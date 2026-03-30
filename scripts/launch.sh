@@ -60,12 +60,12 @@ echo -e "${CYAN}Creating tmux studio with 1 commander + $AGENT_COUNT agents...${
 
 # Commander pane (window 0)
 tmux new-session -d -s "$SESSION" -n "commander" \
-    -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST"
+    -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST" -e "STUDIO_AGENT_ID=commander"
 
 # Agent panes (windows 1..N)
 for i in $(seq 1 "$AGENT_COUNT"); do
     tmux new-window -t "$SESSION" -n "agent-$i" \
-        -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST"
+        -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST" -e "STUDIO_AGENT_ID=agent-$i"
 done
 
 # ── 4. Print instructions ──────────────────────────
