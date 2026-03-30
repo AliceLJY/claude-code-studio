@@ -74,6 +74,14 @@ for i in $(seq 1 "$AGENT_COUNT"); do
         -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST" -e "STUDIO_AGENT_ID=agent-$i"
 done
 
+# ── 3b. Auto-start claude in all windows ──────────
+sleep 1
+echo -e "${CYAN}Starting Claude in all windows...${NC}"
+tmux send-keys -t "$SESSION:commander" "claude" Enter
+for i in $(seq 1 "$AGENT_COUNT"); do
+    tmux send-keys -t "$SESSION:agent-$i" "claude" Enter
+done
+
 # ── 4. Print instructions ──────────────────────────
 echo ""
 echo -e "${GREEN}Studio is ready!${NC}"
