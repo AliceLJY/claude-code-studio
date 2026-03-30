@@ -242,6 +242,42 @@ def studio_status() -> str:
     return "\n".join(lines)
 
 
+# ── Kick (auto-prompt agent via tmux) ───────────────────
+
+@mcp.tool()
+def kick(agent_id: str, prompt: str = "") -> str:
+    """Wake up an agent by sending a prompt to their tmux window.
+    Use this so you don't have to manually switch windows.
+
+    Args:
+        agent_id: The agent to kick (e.g. "agent-1", "agent-2")
+        prompt: What to tell them (default: "check inbox and do your tasks")
+    """
+    import subprocess
+
+    if not prompt:
+        prompt = "check inbox, if there are tasks do them, report back when done"
+
+    # find the tmux window matching agent_id
+    try:
+        result = subprocess.run(
+            ["tmux", "list-windows", "-t", "studio", "-F", "#{window_name}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        windows = result.stdout.strip().split("\n")
+        if agent_id not in windows:
+            return f"Window '{agent_id}' not found in studio. Available: {', '.join(windows)}"
+
+        # send the prompt as keystrokes to that window
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"studio:{agent_id}", prompt, "Enter"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return f"Kicked '{agent_id}' with: {prompt}"
+    except Exception as e:
+        return f"Failed to kick '{agent_id}': {e}"
+
+
 # ── Entrypoint ──────────────────────────────────────────
 
 def main():
