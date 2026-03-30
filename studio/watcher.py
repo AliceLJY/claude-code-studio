@@ -23,12 +23,17 @@ def is_agent_idle(agent_id: str) -> bool:
     """Check if the agent's tmux pane is waiting for input (not busy)."""
     try:
         result = subprocess.run(
-            ["tmux", "capture-pane", "-t", f"studio:{agent_id}", "-p", "-l", "3"],
+            ["tmux", "capture-pane", "-t", f"studio:{agent_id}", "-p"],
             capture_output=True, text=True, timeout=5,
         )
         last_lines = result.stdout.strip()
-        # if the last line ends with common idle indicators, agent is waiting
-        return last_lines.endswith(">") or last_lines.endswith("% ") or last_lines.endswith("$ ")
+        if not last_lines:
+            return False
+        last_line = last_lines.split("\n")[-1].strip()
+        # Claude Code shows "? for shortcuts" when waiting for input
+        # Shell prompt ends with %, $, or >
+        idle_indicators = ["? for shortcuts", "%", "$", ">"]
+        return any(last_line.endswith(ind) for ind in idle_indicators)
     except Exception:
         return False
 
@@ -45,7 +50,7 @@ def kick_agent(agent_id: str):
 def main():
     db.init_db()
     interval = int(os.environ.get("WATCHER_INTERVAL", "5"))
-    print(f"Watcher started. Polling every {interval}s...")
+    print(f"Watcher started. Polling every {interval}s...", flush=True)
 
     # track which agents we already kicked (avoid spamming)
     kicked: dict[str, float] = {}
@@ -77,7 +82,7 @@ def main():
                         continue
 
                     if is_agent_idle(aid):
-                        print(f"[watcher] {aid} has {unread} unread msg(s) — kicking!")
+                        print(f"[watcher] {aid} has {unread} unread msg(s) — kicking!", flush=True)
                         kick_agent(aid)
                         kicked[aid] = time.time()
 
