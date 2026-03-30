@@ -55,6 +55,12 @@ for i in $(seq 1 10); do
     sleep 0.5
 done
 
+# ── 2b. Start watcher daemon ───────────────────────
+echo -e "${CYAN}Starting auto-kick watcher...${NC}"
+"$VENV/python" -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
+WATCHER_PID=$!
+echo "Watcher PID: $WATCHER_PID"
+
 # ── 3. Create tmux session ─────────────────────────
 echo -e "${CYAN}Creating tmux studio with 1 commander + $AGENT_COUNT agents...${NC}"
 
@@ -97,8 +103,9 @@ tmux attach -t "$SESSION"
 
 # When user detaches, offer to stop server
 echo ""
-read -p "Stop MCP server (PID $SERVER_PID)? [y/N] " -n 1 -r
+read -p "Stop MCP server + watcher? [y/N] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     kill "$SERVER_PID" 2>/dev/null && echo "Server stopped." || echo "Server already stopped."
+    kill "$WATCHER_PID" 2>/dev/null && echo "Watcher stopped." || echo "Watcher already stopped."
 fi
