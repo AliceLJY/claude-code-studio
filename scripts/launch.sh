@@ -44,7 +44,7 @@ echo "Server PID: $SERVER_PID"
 
 # Wait for server to be ready
 for i in $(seq 1 10); do
-    if curl -sf "http://$HOST:$PORT/sse" >/dev/null 2>&1; then
+    if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 || lsof -ti:"$PORT" >/dev/null 2>&1; then
         echo -e "${GREEN}MCP server is ready.${NC}"
         break
     fi

@@ -155,7 +155,7 @@ def dispatch_task(
 
 @mcp.tool()
 def update_task(task_id: int, status: str, notes: str = "") -> str:
-    """Update a task's status.
+    """Update a task's status. Automatically notifies the task dispatcher.
 
     Args:
         task_id: The task ID to update
@@ -164,10 +164,21 @@ def update_task(task_id: int, status: str, notes: str = "") -> str:
     """
     if status not in ("pending", "in_progress", "done", "blocked"):
         return f"Invalid status '{status}'. Use: pending, in_progress, done, blocked"
-    ok = db.update_task(task_id, status, notes)
-    if not ok:
+    # look up task to notify dispatcher
+    tasks = db.get_tasks()
+    task = next((t for t in tasks if t["id"] == task_id), None)
+    if not task:
         return f"Task #{task_id} not found."
-    return f"Task #{task_id} updated to '{status}'."
+    db.update_task(task_id, status, notes)
+    # auto-notify the person who dispatched this task
+    if task["assigned_by"] and task["assigned_by"] != task["assigned_to"]:
+        notes_str = f"\n\nNotes: {notes}" if notes else ""
+        db.send_message(
+            task["assigned_to"],
+            task["assigned_by"],
+            f"**Task #{task_id} → {status.upper()}**: {task['title']}{notes_str}",
+        )
+    return f"Task #{task_id} updated to '{status}'. Notified '{task['assigned_by']}'."
 
 
 @mcp.tool()
