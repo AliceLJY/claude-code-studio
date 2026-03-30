@@ -1,0 +1,30 @@
+[project]
+name = "claude-code-studio"
+version = "0.1.0"
+description = "Multi-session collaboration studio for Claude Code"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "AliceLJY" },
+]
+keywords = ["claude-code", "mcp", "multi-agent", "collaboration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "fastmcp>=2.0.0",
+]
+
+[project.scripts]
+claude-code-studio = "studio.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["studio"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolCall": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Studio: checking inbox...'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
