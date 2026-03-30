@@ -1,11 +1,16 @@
-"""Auto-kick daemon — watches for unread messages and wakes agents via tmux."""
+"""Auto-kick daemon — watches for unread messages and wakes agents via tmux.
 
+Supports two modes:
+- Redis pub/sub (STUDIO_BACKEND=redis): instant notification, no polling
+- SQLite polling (default): checks every 5s
+"""
+
+import json
 import subprocess
 import time
-import sys
 import os
 
-from studio import db
+_backend = os.environ.get("STUDIO_BACKEND", "sqlite")
 
 
 def get_tmux_windows() -> set[str]:
@@ -30,8 +35,6 @@ def is_agent_idle(agent_id: str) -> bool:
         if not last_lines:
             return False
         last_line = last_lines.split("\n")[-1].strip()
-        # Claude Code shows "? for shortcuts" when waiting for input
-        # Shell prompt ends with %, $, or >
         idle_indicators = ["? for shortcuts", "%", "$", ">"]
         return any(last_line.endswith(ind) for ind in idle_indicators)
     except Exception:
@@ -47,14 +50,69 @@ def kick_agent(agent_id: str):
     )
 
 
-def main():
+# ── Redis pub/sub mode ──────────────────────────────────
+
+def run_redis():
+    """Subscribe to Redis notifications — instant kick, no polling."""
+    import redis as redis_lib
+    from studio import db_redis
+
+    redis_url = os.environ.get("STUDIO_REDIS_URL", "redis://localhost:6379")
+    r = redis_lib.Redis.from_url(redis_url, decode_responses=True)
+    pubsub = r.pubsub()
+    pubsub.psubscribe("studio:notify:*")
+
+    print("[watcher] Redis pub/sub mode — listening for messages...", flush=True)
+
+    kicked: dict[str, float] = {}
+    cooldown = 30
+
+    for message in pubsub.listen():
+        if message["type"] != "pmessage":
+            continue
+
+        try:
+            # channel is "studio:notify:{agent_id}"
+            agent_id = message["channel"].split(":")[-1]
+            data = json.loads(message["data"])
+
+            print(f"[watcher] notification for {agent_id}: {data}", flush=True)
+
+            windows = get_tmux_windows()
+            if agent_id not in windows:
+                continue
+
+            last_kick = kicked.get(agent_id, 0)
+            if time.time() - last_kick < cooldown:
+                print(f"[watcher] {agent_id} in cooldown, skipping", flush=True)
+                continue
+
+            # brief delay to let the agent finish current work
+            time.sleep(1)
+
+            if is_agent_idle(agent_id):
+                print(f"[watcher] kicking {agent_id}!", flush=True)
+                kick_agent(agent_id)
+                kicked[agent_id] = time.time()
+            else:
+                print(f"[watcher] {agent_id} is busy, will get message on next check_inbox", flush=True)
+
+        except Exception as e:
+            print(f"[watcher] error: {e}", flush=True)
+
+
+# ── SQLite polling mode ─────────────────────────────────
+
+def run_sqlite():
+    """Poll SQLite every N seconds — fallback mode."""
+    from studio import db
+
     db.init_db()
     interval = int(os.environ.get("WATCHER_INTERVAL", "5"))
-    print(f"Watcher started. Polling every {interval}s...", flush=True)
+    print(f"[watcher] SQLite polling mode — every {interval}s...", flush=True)
 
-    # track which agents we already kicked (avoid spamming)
     kicked: dict[str, float] = {}
-    cooldown = 30  # don't kick same agent within 30s
+    cooldown = 30
 
     while True:
         try:
@@ -66,7 +124,6 @@ def main():
                 if aid not in windows:
                     continue
 
-                # check unread messages
                 conn = db.get_conn()
                 row = conn.execute(
                     "SELECT COUNT(*) as cnt FROM messages WHERE (to_agent=? OR to_agent='__broadcast__') AND read=0",
@@ -76,20 +133,25 @@ def main():
                 unread = row["cnt"] if row else 0
 
                 if unread > 0:
-                    # cooldown check
                     last_kick = kicked.get(aid, 0)
                     if time.time() - last_kick < cooldown:
                         continue
-
                     if is_agent_idle(aid):
-                        print(f"[watcher] {aid} has {unread} unread msg(s) — kicking!", flush=True)
+                        print(f"[watcher] {aid} has {unread} unread — kicking!", flush=True)
                         kick_agent(aid)
                         kicked[aid] = time.time()
 
         except Exception as e:
-            print(f"[watcher] error: {e}")
+            print(f"[watcher] error: {e}", flush=True)
 
         time.sleep(interval)
+
+
+def main():
+    if _backend == "redis":
+        run_redis()
+    else:
+        run_sqlite()
 
 
 if __name__ == "__main__":

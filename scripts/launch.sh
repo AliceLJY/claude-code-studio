@@ -10,6 +10,7 @@ STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SESSION="studio"
 HOST="${STUDIO_HOST:-localhost}"
 PORT="${STUDIO_PORT:-3777}"
+BACKEND="${STUDIO_BACKEND:-redis}"  # redis (default) or sqlite
 VENV="$STUDIO_DIR/.venv/bin"
 AGENT_COUNT="${1:-3}"  # default 3 worker agents
 
@@ -36,8 +37,8 @@ if lsof -ti:"$PORT" >/dev/null 2>&1; then
 fi
 
 # ── 2. Start MCP server in background ──────────────
-echo -e "${CYAN}Starting MCP server on $HOST:$PORT...${NC}"
-STUDIO_HOST="$HOST" STUDIO_PORT="$PORT" \
+echo -e "${CYAN}Starting MCP server on $HOST:$PORT (backend: $BACKEND)...${NC}"
+STUDIO_HOST="$HOST" STUDIO_PORT="$PORT" STUDIO_BACKEND="$BACKEND" \
     "$VENV/python" -m studio.server > /tmp/studio-server.log 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
@@ -56,8 +57,8 @@ for i in $(seq 1 10); do
 done
 
 # ── 2b. Start watcher daemon ───────────────────────
-echo -e "${CYAN}Starting auto-kick watcher...${NC}"
-"$VENV/python" -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
+echo -e "${CYAN}Starting auto-kick watcher ($BACKEND mode)...${NC}"
+STUDIO_BACKEND="$BACKEND" "$VENV/python" -u -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
 WATCHER_PID=$!
 echo "Watcher PID: $WATCHER_PID"
 

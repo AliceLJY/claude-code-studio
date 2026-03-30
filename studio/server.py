@@ -9,7 +9,12 @@ import os
 
 from fastmcp import FastMCP
 
-from studio import db
+# Backend selection: STUDIO_BACKEND=redis or sqlite (default)
+_backend = os.environ.get("STUDIO_BACKEND", "sqlite")
+if _backend == "redis":
+    from studio import db_redis as db
+else:
+    from studio import db
 
 mcp = FastMCP(
     "Claude Code Studio",
