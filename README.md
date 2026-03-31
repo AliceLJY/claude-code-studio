@@ -47,6 +47,7 @@ All through MCP tools that every Claude Code session can call natively.
 - **Auto-registration** — agents register themselves on startup via project CLAUDE.md
 - **Cross-machine ready** — point `STUDIO_REDIS_URL` at a remote Redis and run agents on different machines
 - **CLI status tool** — check studio status from terminal without entering Claude Code
+- **Cross-model review** — OpenAI's official [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) works inside the studio, letting Codex (GPT-5.4) review code written by Claude — two competing AI companies' models collaborating in one workspace
 
 ## Quick Start
 
@@ -210,6 +211,35 @@ All agents across both machines share the same message bus and task board.
 | One-click launch | Yes | No | No | Yes |
 | Cross-machine | Yes (Redis) | Yes (Git) | No | No |
 | No external deps | SQLite mode | Git + SQLite | Files only | Various |
+
+## Cross-Model Collaboration
+
+Claude Code Studio naturally supports cross-model workflows. With OpenAI's official [codex-plugin-cc](https://github.com/openai/codex-plugin-cc), you can have Codex (GPT-5.4) review code written by Claude agents — right inside the studio.
+
+```
+┌─────────────────────────────────────────────────┐
+│              CLAUDE CODE STUDIO                  │
+│                                                  │
+│   Claude (Opus)     writes code                  │
+│       │                                          │
+│       ▼                                          │
+│   Codex (GPT-5.4)   reviews code (/codex:review)│
+│       │                                          │
+│       ▼                                          │
+│   Claude (Opus)     verifies findings & fixes    │
+│                                                  │
+│   Two competing AI companies' models,            │
+│   collaborating in one workspace.                │
+└─────────────────────────────────────────────────┘
+```
+
+Install the plugin:
+```bash
+claude plugins marketplace add openai/codex-plugin-cc
+claude plugins install codex@openai-codex
+```
+
+Then use `/codex:review`, `/codex:adversarial-review`, or `/codex:rescue` inside any studio session.
 
 ## License
 
