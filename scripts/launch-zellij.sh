@@ -64,37 +64,49 @@ STUDIO_BACKEND="$BACKEND" STUDIO_MUX="zellij" "$VENV/python" -u -m studio.watche
 WATCHER_PID=$!
 echo "Watcher PID: $WATCHER_PID"
 
-# ── 3. Generate zellij layout ─────────────────────
+# ── 3. Generate per-pane wrapper scripts ──────────
 echo -e "${CYAN}Generating zellij layout for 1 commander + $AGENT_COUNT agents...${NC}"
 
+make_pane_script() {
+    local agent_id="$1"
+    local script="/tmp/studio-pane-${agent_id}.sh"
+    cat > "$script" <<SCRIPTEOF
+#!/usr/bin/env zsh -il
+export STUDIO_PORT="$PORT"
+export STUDIO_HOST="$HOST"
+export STUDIO_AGENT_ID="$agent_id"
+export STUDIO_MUX="zellij"
+claude
+SCRIPTEOF
+    chmod +x "$script"
+    echo "$script"
+}
+
+COMMANDER_SCRIPT="$(make_pane_script commander)"
+AGENT_SCRIPTS=()
+for i in $(seq 1 "$AGENT_COUNT"); do
+    AGENT_SCRIPTS+=("$(make_pane_script "agent-$i")")
+done
+
+# ── 4. Generate zellij layout (minimal KDL) ──────
 cat > "$LAYOUT_FILE" <<KDLEOF
 layout {
     tab name="commander" focus=true {
-        pane name="commander" command="claude" {
-            env STUDIO_PORT "$PORT"
-            env STUDIO_HOST "$HOST"
-            env STUDIO_AGENT_ID "commander"
-            env STUDIO_MUX "zellij"
-        }
+        pane command="$COMMANDER_SCRIPT"
     }
 KDLEOF
 
 for i in $(seq 1 "$AGENT_COUNT"); do
     cat >> "$LAYOUT_FILE" <<KDLEOF
     tab name="agent-$i" {
-        pane name="agent-$i" command="claude" {
-            env STUDIO_PORT "$PORT"
-            env STUDIO_HOST "$HOST"
-            env STUDIO_AGENT_ID "agent-$i"
-            env STUDIO_MUX "zellij"
-        }
+        pane command="${AGENT_SCRIPTS[$((i-1))]}"
     }
 KDLEOF
 done
 
 echo "}" >> "$LAYOUT_FILE"
 
-# ── 4. Write pane map (pane IDs are sequential from layout) ──
+# ── 5. Write pane map ──
 echo -n "{" > "$PANE_MAP"
 echo -n "\"commander\": 0" >> "$PANE_MAP"
 for i in $(seq 1 "$AGENT_COUNT"); do
@@ -103,7 +115,7 @@ done
 echo "}" >> "$PANE_MAP"
 echo "Pane map written to $PANE_MAP"
 
-# ── 5. Print instructions ──────────────────────────
+# ── 6. Print instructions ──────────────────────────
 echo ""
 echo -e "${GREEN}Launching zellij studio...${NC}"
 echo ""
@@ -123,8 +135,8 @@ echo "  Detach: Ctrl+O, D"
 echo "  Reattach: zellij attach $SESSION"
 echo ""
 
-# ── 6. Launch zellij (blocks until detach) ─────────
-zellij --session "$SESSION" --layout "$LAYOUT_FILE"
+# ── 7. Launch zellij (blocks until detach) ─────────
+zellij -s "$SESSION" -n "$LAYOUT_FILE"
 
 # When user detaches, offer to stop server
 echo ""
