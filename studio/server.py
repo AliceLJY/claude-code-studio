@@ -148,6 +148,9 @@ def dispatch_task(
     """
     if priority not in ("high", "medium", "low"):
         priority = "medium"
+    agents = {a["agent_id"] for a in db.list_agents()}
+    if assigned_to not in agents:
+        return f"Error: agent '{assigned_to}' not found. Available: {', '.join(sorted(agents))}"
     task_id = db.create_task(title, description, assigned_to, assigned_by, priority)
     # also notify via message
     db.send_message(
@@ -275,7 +278,11 @@ def kick(agent_id: str, prompt: str = "") -> str:
 
         # send the prompt as keystrokes to that window
         subprocess.run(
-            ["tmux", "send-keys", "-t", f"studio:{agent_id}", prompt, "Enter"],
+            ["tmux", "send-keys", "-t", f"studio:{agent_id}", "-l", prompt],
+            capture_output=True, text=True, timeout=5,
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"studio:{agent_id}", "Enter"],
             capture_output=True, text=True, timeout=5,
         )
         return f"Kicked '{agent_id}' with: {prompt}"

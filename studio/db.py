@@ -123,12 +123,17 @@ def broadcast(from_agent: str, content: str):
 
 def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
     conn = get_conn()
+    # ensure broadcast_reads table exists
+    conn.execute("""CREATE TABLE IF NOT EXISTS broadcast_reads (
+        agent_id TEXT, msg_id INTEGER, PRIMARY KEY (agent_id, msg_id))""")
     if unread_only:
         rows = conn.execute(
             """SELECT * FROM messages
-               WHERE (to_agent=? OR to_agent='__broadcast__') AND read=0
+               WHERE (to_agent=? AND read=0)
+                  OR (to_agent='__broadcast__'
+                      AND id NOT IN (SELECT msg_id FROM broadcast_reads WHERE agent_id=?))
                ORDER BY created_at""",
-            (agent_id,),
+            (agent_id, agent_id),
         ).fetchall()
     else:
         rows = conn.execute(
@@ -137,12 +142,20 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
                ORDER BY created_at DESC LIMIT 50""",
             (agent_id,),
         ).fetchall()
-    # mark as read
-    ids = [r["id"] for r in rows]
-    if ids:
-        placeholders = ",".join("?" * len(ids))
-        conn.execute(f"UPDATE messages SET read=1 WHERE id IN ({placeholders})", ids)
-        conn.commit()
+    # mark as read — only mark direct messages; broadcasts use per-agent tracking
+    direct_ids = [r["id"] for r in rows if r["to_agent"] != "__broadcast__"]
+    broadcast_ids = [r["id"] for r in rows if r["to_agent"] == "__broadcast__"]
+    if direct_ids:
+        placeholders = ",".join("?" * len(direct_ids))
+        conn.execute(f"UPDATE messages SET read=1 WHERE id IN ({placeholders})", direct_ids)
+    # track broadcast reads per-agent
+    if broadcast_ids:
+        conn.execute("""CREATE TABLE IF NOT EXISTS broadcast_reads (
+            agent_id TEXT, msg_id INTEGER, PRIMARY KEY (agent_id, msg_id))""")
+        for mid in broadcast_ids:
+            conn.execute("INSERT OR IGNORE INTO broadcast_reads (agent_id, msg_id) VALUES (?,?)",
+                         (agent_id, mid))
+    conn.commit()
     conn.close()
     return [dict(r) for r in rows]
 

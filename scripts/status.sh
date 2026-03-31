@@ -17,7 +17,6 @@ NC='\033[0m'
 
 STUDIO_BACKEND="$BACKEND" "$VENV/python" -c "
 import os, time, datetime
-os.environ['STUDIO_BACKEND'] = '$BACKEND'
 
 backend = os.environ.get('STUDIO_BACKEND', 'sqlite')
 if backend == 'redis':

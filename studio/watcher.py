@@ -45,15 +45,36 @@ def kick_agent(agent_id: str):
     """Send a prompt to the agent's tmux window."""
     prompt = "You have new messages. Check inbox and handle them."
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"studio:{agent_id}", prompt, "Enter"],
+        ["tmux", "send-keys", "-t", f"studio:{agent_id}", "-l", prompt],
+        capture_output=True, text=True, timeout=5,
+    )
+    subprocess.run(
+        ["tmux", "send-keys", "-t", f"studio:{agent_id}", "Enter"],
         capture_output=True, text=True, timeout=5,
     )
 
 
 # ── Redis pub/sub mode ──────────────────────────────────
 
+def _try_kick(agent_id: str, kicked: dict[str, float], cooldown: int, reason: str) -> bool:
+    """Attempt to kick an agent if idle and not in cooldown. Returns True if kicked."""
+    windows = get_tmux_windows()
+    if agent_id not in windows:
+        return False
+    last_kick = kicked.get(agent_id, 0)
+    if time.time() - last_kick < cooldown:
+        return False
+    if is_agent_idle(agent_id):
+        print(f"[watcher] kicking {agent_id} ({reason})!", flush=True)
+        kick_agent(agent_id)
+        kicked[agent_id] = time.time()
+        return True
+    return False
+
+
 def run_redis():
-    """Subscribe to Redis notifications — instant kick, no polling."""
+    """Subscribe to Redis notifications with fallback polling for missed messages."""
+    import threading
     import redis as redis_lib
     from studio import db_redis
 
@@ -67,35 +88,36 @@ def run_redis():
     kicked: dict[str, float] = {}
     cooldown = 30
 
+    # Fallback polling thread: catch messages missed by pub/sub
+    def _fallback_poll():
+        poll_interval = 15
+        while True:
+            time.sleep(poll_interval)
+            try:
+                windows = get_tmux_windows()
+                for aid in r.smembers("studio:agents"):
+                    if aid not in windows:
+                        continue
+                    inbox_len = r.llen(f"studio:inbox:{aid}")
+                    if inbox_len > 0:
+                        _try_kick(aid, kicked, cooldown, "fallback poll")
+            except Exception as e:
+                print(f"[watcher] fallback poll error: {e}", flush=True)
+
+    poll_thread = threading.Thread(target=_fallback_poll, daemon=True)
+    poll_thread.start()
+
     for message in pubsub.listen():
         if message["type"] != "pmessage":
             continue
 
         try:
-            # channel is "studio:notify:{agent_id}"
             agent_id = message["channel"].split(":")[-1]
             data = json.loads(message["data"])
-
             print(f"[watcher] notification for {agent_id}: {data}", flush=True)
 
-            windows = get_tmux_windows()
-            if agent_id not in windows:
-                continue
-
-            last_kick = kicked.get(agent_id, 0)
-            if time.time() - last_kick < cooldown:
-                print(f"[watcher] {agent_id} in cooldown, skipping", flush=True)
-                continue
-
-            # brief delay to let the agent finish current work
             time.sleep(1)
-
-            if is_agent_idle(agent_id):
-                print(f"[watcher] kicking {agent_id}!", flush=True)
-                kick_agent(agent_id)
-                kicked[agent_id] = time.time()
-            else:
-                print(f"[watcher] {agent_id} is busy, will get message on next check_inbox", flush=True)
+            _try_kick(agent_id, kicked, cooldown, "pub/sub")
 
         except Exception as e:
             print(f"[watcher] error: {e}", flush=True)
