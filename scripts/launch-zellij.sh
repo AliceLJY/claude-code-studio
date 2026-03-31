@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
 # ┌──────────────────────────────────────────────────┐
-# │  Claude Code Studio — Launch Script              │
-# │  Start the MCP server + tmux session with panes  │
+# │  Claude Code Studio — Zellij Launch Script       │
+# │  Start the MCP server + zellij session           │
 # └──────────────────────────────────────────────────┘
 
 set -euo pipefail
 
 STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-# ── Multiplexer selection ──────────────────────────
-MUX="${STUDIO_MUX:-tmux}"
-if [ "$MUX" = "zellij" ]; then
-    exec "$STUDIO_DIR/scripts/launch-zellij.sh" "$@"
-fi
-
 SESSION="studio"
 HOST="${STUDIO_HOST:-localhost}"
 PORT="${STUDIO_PORT:-3777}"
-BACKEND="${STUDIO_BACKEND:-redis}"  # redis (default) or sqlite
+BACKEND="${STUDIO_BACKEND:-redis}"
 VENV="$STUDIO_DIR/.venv/bin"
-AGENT_COUNT="${1:-3}"  # default 3 worker agents
+AGENT_COUNT="${1:-3}"
+LAYOUT_FILE="/tmp/studio-layout.kdl"
+PANE_MAP="/tmp/studio-zellij-panes.json"
 
 # Colors
 GREEN='\033[0;32m'
@@ -27,13 +22,13 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║   Claude Code Studio — Launching...  ║${NC}"
+echo -e "${GREEN}║  Claude Code Studio — Zellij Mode    ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
 
 # ── 1. Kill old studio if running ───────────────────
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "Existing studio session found. Killing it..."
-    tmux kill-session -t "$SESSION"
+if zellij list-sessions -n -s 2>/dev/null | grep -q "^${SESSION}$"; then
+    echo "Existing zellij studio session found. Killing it..."
+    zellij delete-session "$SESSION" --force 2>/dev/null || true
 fi
 
 # Kill old MCP server if running
@@ -64,58 +59,72 @@ for i in $(seq 1 10); do
 done
 
 # ── 2b. Start watcher daemon ───────────────────────
-echo -e "${CYAN}Starting auto-kick watcher ($BACKEND mode)...${NC}"
-STUDIO_BACKEND="$BACKEND" "$VENV/python" -u -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
+echo -e "${CYAN}Starting auto-kick watcher ($BACKEND mode, zellij mux)...${NC}"
+STUDIO_BACKEND="$BACKEND" STUDIO_MUX="zellij" "$VENV/python" -u -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
 WATCHER_PID=$!
 echo "Watcher PID: $WATCHER_PID"
 
-# ── 3. Create tmux session ─────────────────────────
-echo -e "${CYAN}Creating tmux studio with 1 commander + $AGENT_COUNT agents...${NC}"
+# ── 3. Generate zellij layout ─────────────────────
+echo -e "${CYAN}Generating zellij layout for 1 commander + $AGENT_COUNT agents...${NC}"
 
-# Commander pane (window 0)
-tmux new-session -d -s "$SESSION" -n "commander" \
-    -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST" -e "STUDIO_AGENT_ID=commander"
+cat > "$LAYOUT_FILE" <<KDLEOF
+layout {
+    tab name="commander" focus=true {
+        pane name="commander" command="claude" {
+            env STUDIO_PORT "$PORT"
+            env STUDIO_HOST "$HOST"
+            env STUDIO_AGENT_ID "commander"
+            env STUDIO_MUX "zellij"
+        }
+    }
+KDLEOF
 
-# Agent panes (windows 1..N)
 for i in $(seq 1 "$AGENT_COUNT"); do
-    tmux new-window -t "$SESSION" -n "agent-$i" \
-        -e "STUDIO_PORT=$PORT" -e "STUDIO_HOST=$HOST" -e "STUDIO_AGENT_ID=agent-$i"
+    cat >> "$LAYOUT_FILE" <<KDLEOF
+    tab name="agent-$i" {
+        pane name="agent-$i" command="claude" {
+            env STUDIO_PORT "$PORT"
+            env STUDIO_HOST "$HOST"
+            env STUDIO_AGENT_ID "agent-$i"
+            env STUDIO_MUX "zellij"
+        }
+    }
+KDLEOF
 done
 
-# ── 3b. Auto-start claude in all windows ──────────
-sleep 1
-echo -e "${CYAN}Starting Claude in all windows...${NC}"
-tmux send-keys -t "$SESSION:commander" "claude" Enter
-for i in $(seq 1 "$AGENT_COUNT"); do
-    tmux send-keys -t "$SESSION:agent-$i" "claude" Enter
-done
+echo "}" >> "$LAYOUT_FILE"
 
-# ── 4. Print instructions ──────────────────────────
+# ── 4. Write pane map (pane IDs are sequential from layout) ──
+echo -n "{" > "$PANE_MAP"
+echo -n "\"commander\": 0" >> "$PANE_MAP"
+for i in $(seq 1 "$AGENT_COUNT"); do
+    echo -n ", \"agent-$i\": $i" >> "$PANE_MAP"
+done
+echo "}" >> "$PANE_MAP"
+echo "Pane map written to $PANE_MAP"
+
+# ── 5. Print instructions ──────────────────────────
 echo ""
-echo -e "${GREEN}Studio is ready!${NC}"
+echo -e "${GREEN}Launching zellij studio...${NC}"
 echo ""
-echo "  tmux session: $SESSION"
+echo "  Session:      $SESSION"
 echo "  MCP server:   http://$HOST:$PORT/sse"
 echo "  Server log:   /tmp/studio-server.log"
 echo "  Server PID:   $SERVER_PID"
+echo "  Pane map:     $PANE_MAP"
 echo ""
-echo "  Windows:"
+echo "  Tabs:"
 echo "    0: commander  — your main Claude Code session"
 for i in $(seq 1 "$AGENT_COUNT"); do
     echo "    $i: agent-$i    — worker session"
 done
 echo ""
-echo "  Quick start in each pane:"
-echo "    claude  (then use studio MCP tools to register, message, etc.)"
+echo "  Detach: Ctrl+O, D"
+echo "  Reattach: zellij attach $SESSION"
 echo ""
-echo "  Add to your Claude Code settings.json or use /mcp in each session:"
-echo "    {\"type\": \"sse\", \"url\": \"http://$HOST:$PORT/sse\"}"
-echo ""
-echo -e "${CYAN}Attaching to tmux session...${NC}"
 
-# Select commander window and attach
-tmux select-window -t "$SESSION:0"
-tmux attach -t "$SESSION"
+# ── 6. Launch zellij (blocks until detach) ─────────
+zellij --session "$SESSION" --layout "$LAYOUT_FILE"
 
 # When user detaches, offer to stop server
 echo ""

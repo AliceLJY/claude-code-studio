@@ -55,7 +55,7 @@ All through MCP tools that every Claude Code session can call natively.
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- tmux
+- tmux or [zellij](https://zellij.dev) (either one works)
 - Redis (Docker: `docker run -d -p 6379:6379 redis:7-alpine`)
 - Claude Code CLI
 
@@ -75,6 +75,9 @@ uv venv && uv pip install -e .
 
 # Specify agent count
 ./scripts/launch.sh 5
+
+# Use zellij instead of tmux
+STUDIO_MUX=zellij ./scripts/launch.sh
 ```
 
 This will:
@@ -184,6 +187,7 @@ No window switching needed. Messages flow automatically.
 | `STUDIO_PORT` | `3777` | MCP server port |
 | `STUDIO_BACKEND` | `redis` | Storage backend: `redis` or `sqlite` |
 | `STUDIO_REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
+| `STUDIO_MUX` | `tmux` | Terminal multiplexer: `tmux` or `zellij` |
 | `STUDIO_DB_PATH` | `~/.claude-code-studio/studio.db` | SQLite database path (sqlite mode) |
 
 ## Cross-Machine Setup
