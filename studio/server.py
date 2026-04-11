@@ -5,9 +5,13 @@ to communicate, coordinate tasks, and collaborate as a team.
 """
 
 import datetime
+import logging
 import os
+import subprocess
 
 from fastmcp import FastMCP
+
+logger = logging.getLogger(__name__)
 
 # Backend selection: STUDIO_BACKEND=redis or sqlite (default)
 _backend = os.environ.get("STUDIO_BACKEND", "sqlite")
@@ -263,6 +267,10 @@ def kick(agent_id: str, prompt: str = "") -> str:
     """
     from studio import mux
 
+    # P2: Input validation
+    if not agent_id or not agent_id.strip():
+        return "Error: agent_id cannot be empty."
+
     if not prompt:
         prompt = "check inbox, if there are tasks do them, report back when done"
 
@@ -274,16 +282,38 @@ def kick(agent_id: str, prompt: str = "") -> str:
         mux.send_keys(agent_id, prompt)
         mux.send_enter(agent_id)
         return f"Kicked '{agent_id}' with: {prompt}"
+    except (OSError, subprocess.SubprocessError) as e:
+        # P1 Fix 10: Narrow exception types, add logging
+        logger.error("Failed to kick '%s': %s", agent_id, e, exc_info=True)
+        return f"Failed to kick '{agent_id}': {e}"
     except Exception as e:
+        logger.error("Unexpected error kicking '%s': %s", agent_id, e, exc_info=True)
         return f"Failed to kick '{agent_id}': {e}"
 
 
 # ── Entrypoint ──────────────────────────────────────────
 
 def main():
-    db.init_db()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+    # P2: Server startup error handling -- log and exit cleanly on fatal errors
+    try:
+        db.init_db()
+    except Exception as exc:
+        logger.error("Failed to initialize database: %s", exc, exc_info=True)
+        raise SystemExit(1) from exc
+
     host = os.environ.get("STUDIO_HOST", "localhost")
-    port = int(os.environ.get("STUDIO_PORT", "3777"))
+    port_str = os.environ.get("STUDIO_PORT", "3777")
+    try:
+        port = int(port_str)
+    except ValueError:
+        logger.error("Invalid STUDIO_PORT value: %r (must be integer)", port_str)
+        raise SystemExit(1)
+
+    logger.info("Starting Claude Code Studio on %s:%d (backend=%s)", host, port, _backend)
     mcp.run(transport="sse", host=host, port=port)
 
 

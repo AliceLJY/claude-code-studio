@@ -1,16 +1,32 @@
-"""Terminal multiplexer abstraction — supports tmux and zellij.
+"""Terminal multiplexer abstraction -- supports tmux and zellij.
 
 Selection via STUDIO_MUX env var: "tmux" (default) or "zellij".
 """
 
+import atexit
 import json
+import logging
 import os
 import re
 import subprocess
 
+logger = logging.getLogger(__name__)
+
 _mux = os.environ.get("STUDIO_MUX", "tmux")
 SESSION = "studio"
 PANE_MAP_FILE = "/tmp/studio-zellij-panes.json"
+
+
+# P2: Zellij temp file cleanup on exit
+def _cleanup_zellij_temp():
+    if _mux == "zellij" and os.path.exists(PANE_MAP_FILE):
+        try:
+            os.remove(PANE_MAP_FILE)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_zellij_temp)
 
 
 # ── Shared helpers ─────────────────────────────────────
@@ -19,8 +35,18 @@ def _run(cmd: list[str], timeout: int = 5) -> str:
     """Run a command and return stdout. Empty string on failure."""
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0 and result.stderr:
+            # P1 Fix 7: Log mux failures instead of silent swallow
+            logger.debug("mux command %s failed (rc=%d): %s", cmd[0], result.returncode, result.stderr.strip())
         return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
+    except subprocess.TimeoutExpired:
+        logger.warning("mux command timed out: %s", " ".join(cmd))
+        return ""
+    except FileNotFoundError:
+        logger.warning("mux binary not found: %s", cmd[0])
+        return ""
+    except OSError as e:
+        logger.warning("mux command error: %s", e)
         return ""
 
 

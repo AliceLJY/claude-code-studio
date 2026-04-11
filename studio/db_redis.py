@@ -4,11 +4,15 @@ Drop-in replacement for db.py with pub/sub support.
 Messages trigger real-time notifications via Redis pub/sub.
 """
 
+import atexit
 import json
+import logging
 import os
 import time
 
 import redis
+
+logger = logging.getLogger(__name__)
 
 REDIS_URL = os.environ.get("STUDIO_REDIS_URL", "redis://localhost:6379")
 REDIS_PREFIX = "studio:"
@@ -16,6 +20,11 @@ MSG_TTL = 3600 * 24  # messages expire after 24h
 TASK_TTL = 3600 * 72  # tasks expire after 72h
 
 _pool: redis.ConnectionPool | None = None
+
+# Exponential backoff state for Redis reconnection (P2)
+_backoff_attempt: int = 0
+_BACKOFF_BASE: float = 1.0
+_BACKOFF_MAX: float = 60.0
 
 
 def _get_pool() -> redis.ConnectionPool:
@@ -25,14 +34,44 @@ def _get_pool() -> redis.ConnectionPool:
     return _pool
 
 
+def _reset_pool():
+    """Discard the current connection pool so the next call creates a fresh one."""
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.disconnect()
+        except Exception:
+            pass
+        _pool = None
+
+
+# P2: Clean up global connection pool on process exit
+atexit.register(_reset_pool)
+
+
 def get_conn() -> redis.Redis:
     return redis.Redis(connection_pool=_get_pool())
 
 
 def init_db():
-    """Test connection."""
-    r = get_conn()
-    r.ping()
+    """Test Redis connection. Logs a warning instead of crashing if Redis is down."""
+    global _backoff_attempt
+    try:
+        r = get_conn()
+        r.ping()
+        _backoff_attempt = 0  # reset on success
+        logger.info("Redis connection OK (%s)", REDIS_URL)
+    except redis.ConnectionError as exc:
+        _backoff_attempt += 1
+        wait = min(_BACKOFF_BASE * (2 ** (_backoff_attempt - 1)), _BACKOFF_MAX)
+        logger.warning(
+            "Redis unavailable at %s (attempt %d, next retry in %.1fs): %s",
+            REDIS_URL, _backoff_attempt, wait, exc,
+        )
+        _reset_pool()
+    except redis.RedisError as exc:
+        logger.warning("Redis error during init: %s", exc)
+        _reset_pool()
 
 
 # ── Agents ──────────────────────────────────────────────
@@ -49,8 +88,12 @@ def register_agent(agent_id: str, name: str, role: str = "", project_dir: str = 
         "registered_at": now,
         "last_seen": now,
     }
-    r.hset(f"{REDIS_PREFIX}agent:{agent_id}", mapping={k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in agent_data.items()})
-    r.sadd(f"{REDIS_PREFIX}agents", agent_id)
+    mapping = {k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in agent_data.items()}
+    # Use pipeline for atomicity (P1: Redis set race)
+    pipe = r.pipeline(transaction=True)
+    pipe.hset(f"{REDIS_PREFIX}agent:{agent_id}", mapping=mapping)
+    pipe.sadd(f"{REDIS_PREFIX}agents", agent_id)
+    pipe.execute()
 
 
 def unregister_agent(agent_id: str):
@@ -97,21 +140,24 @@ def send_message(from_agent: str, to_agent: str, content: str):
         "read": 0,
     }
     msg_key = f"{REDIS_PREFIX}msg:{msg_id}"
-    r.hset(msg_key, mapping={k: str(v) for k, v in msg.items()})
-    r.expire(msg_key, MSG_TTL)
+    notification = json.dumps({"type": "message", "msg_id": msg_id, "from": from_agent})
 
-    # add to recipient's inbox
+    # Use pipeline to batch writes atomically (P1: Redis set race)
+    pipe = r.pipeline(transaction=True)
+    pipe.hset(msg_key, mapping={k: str(v) for k, v in msg.items()})
+    pipe.expire(msg_key, MSG_TTL)
+
     if to_agent == "__broadcast__":
-        # add to all agents' inboxes
-        for aid in r.smembers(f"{REDIS_PREFIX}agents"):
+        agent_ids = r.smembers(f"{REDIS_PREFIX}agents")
+        for aid in agent_ids:
             if aid != from_agent:
-                r.rpush(f"{REDIS_PREFIX}inbox:{aid}", msg_id)
-                # pub/sub: notify immediately
-                r.publish(f"{REDIS_PREFIX}notify:{aid}", json.dumps({"type": "message", "msg_id": msg_id, "from": from_agent}))
+                pipe.rpush(f"{REDIS_PREFIX}inbox:{aid}", msg_id)
+                pipe.publish(f"{REDIS_PREFIX}notify:{aid}", notification)
     else:
-        r.rpush(f"{REDIS_PREFIX}inbox:{to_agent}", msg_id)
-        # pub/sub: notify immediately
-        r.publish(f"{REDIS_PREFIX}notify:{to_agent}", json.dumps({"type": "message", "msg_id": msg_id, "from": from_agent}))
+        pipe.rpush(f"{REDIS_PREFIX}inbox:{to_agent}", msg_id)
+        pipe.publish(f"{REDIS_PREFIX}notify:{to_agent}", notification)
+
+    pipe.execute()
 
 
 def broadcast(from_agent: str, content: str):
@@ -120,8 +166,10 @@ def broadcast(from_agent: str, content: str):
 
 def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
     r = get_conn()
-    msg_ids = r.lrange(f"{REDIS_PREFIX}inbox:{agent_id}", 0, -1)
+    inbox_key = f"{REDIS_PREFIX}inbox:{agent_id}"
+    msg_ids = r.lrange(inbox_key, 0, -1)
     msgs = []
+    read_mids = []
     for mid in msg_ids:
         data = r.hgetall(f"{REDIS_PREFIX}msg:{mid}")
         if not data:
@@ -132,15 +180,21 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
         if unread_only and data["read"] == 1:
             continue
         msgs.append(data)
-        # mark as read
-        r.hset(f"{REDIS_PREFIX}msg:{mid}", "read", "1")
+        read_mids.append(mid)
 
-    # clear inbox after reading
+    # Mark read and clean up in a pipeline to avoid partial state (P2: message loss)
+    if read_mids:
+        pipe = r.pipeline(transaction=True)
+        for mid in read_mids:
+            pipe.hset(f"{REDIS_PREFIX}msg:{mid}", "read", "1")
+        if unread_only:
+            # Remove only the messages we actually read, not the whole inbox
+            for mid in read_mids:
+                pipe.lrem(inbox_key, 1, mid)
+        pipe.execute()
+
     if not unread_only:
-        msgs = msgs[-50:]  # last 50
-    else:
-        # remove read messages from inbox list
-        r.delete(f"{REDIS_PREFIX}inbox:{agent_id}")
+        msgs = msgs[-50:]
 
     return msgs
 
