@@ -185,6 +185,19 @@ claude plugins install codex@openai-codex
 
 然后在任何 studio 会话中使用 `/codex:review`、`/codex:adversarial-review` 或 `/codex:rescue`。
 
+## 生态
+
+**小试AI** 开源 AI 工作流生态的一部分：
+
+| 项目 | 简介 |
+|------|------|
+| [recallnest](https://github.com/AliceLJY/recallnest) | MCP 记忆工作台（LanceDB + Jina v5） |
+| [content-publisher](https://github.com/AliceLJY/content-publisher) | 配图 + 排版 + 公众号发布 |
+| [openclaw-tunnel](https://github.com/AliceLJY/openclaw-tunnel) | Docker ↔ 宿主机 CLI 桥（/cc /codex /gemini） |
+| [digital-clone-skill](https://github.com/AliceLJY/digital-clone-skill) | 用语料构建数字分身 |
+| [telegram-ai-bridge](https://github.com/AliceLJY/telegram-ai-bridge) | Claude / Codex / Gemini 的 Telegram bot |
+| [cc-empire](https://github.com/AliceLJY/cc-empire) | 完整的 Claude Code 工作流脚手架（规则 + 钩子 + agent） |
+
 ## 许可证
 
 MIT
