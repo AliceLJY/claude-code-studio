@@ -24,6 +24,11 @@ KICK_COOLDOWN = int(os.environ.get("WATCHER_COOLDOWN", "30"))
 REDIS_KICK_DELAY = float(os.environ.get("WATCHER_REDIS_KICK_DELAY", "1"))
 FALLBACK_POLL_INTERVAL = int(os.environ.get("WATCHER_FALLBACK_INTERVAL", "15"))
 
+# Auto-kick relies on is_agent_idle(), a best-effort terminal-scraping heuristic
+# that can misread a busy agent as idle and interrupt it. Default on (it's the
+# point of the watcher), but allow disabling to avoid the false-positive kicks.
+AUTO_KICK = os.environ.get("STUDIO_AUTO_KICK", "1").lower() not in ("0", "false", "no")
+
 # P2: Daemon shutdown flag
 _shutdown = False
 
@@ -35,17 +40,31 @@ def _handle_shutdown(signum, frame):
 
 
 def is_agent_idle(agent_id: str) -> bool:
-    """Check if the agent's pane is waiting for input (not busy)."""
+    """Best-effort guess at whether the agent's pane is waiting for input.
+
+    This scrapes the last terminal line and is inherently unreliable: a bare
+    ">" was dropped from the indicators because Claude Code emits it constantly
+    while streaming markdown quotes and code, which made the watcher kick agents
+    that were mid-output. The remaining markers (shell prompts, the Claude TUI
+    "? for shortcuts" hint) are still heuristic, not authoritative.
+    """
     last_lines = mux.capture_pane(agent_id)
     if not last_lines:
         return False
     last_line = last_lines.split("\n")[-1].strip()
-    idle_indicators = ["? for shortcuts", "%", "$", ">"]
+    idle_indicators = ["? for shortcuts", "❯", "$ ", "% "]
     return any(last_line.endswith(ind) for ind in idle_indicators)
 
 
 def kick_agent(agent_id: str):
-    """Send a prompt to the agent's pane."""
+    """Send a prompt to the agent's pane (best-effort auto-wake).
+
+    Honors STUDIO_AUTO_KICK as a final guard so a misfiring idle-heuristic can
+    be turned off without disabling the rest of the watcher.
+    """
+    if not AUTO_KICK:
+        logger.info("Auto-kick disabled (STUDIO_AUTO_KICK=0); not kicking %s", agent_id)
+        return
     prompt = "You have new messages. Check inbox and handle them."
     mux.send_keys(agent_id, prompt)
     mux.send_enter(agent_id)
@@ -165,9 +184,18 @@ def run_sqlite():
                 # P1 Fix 5: Use managed connection to prevent leaks
                 try:
                     with db._managed_conn() as conn:
+                        # Broadcast read state lives in broadcast_reads (per
+                        # agent), NOT messages.read — which for broadcasts is
+                        # never set, so counting `read=0` alone would treat every
+                        # past broadcast as forever-unread and kick endlessly.
+                        db._ensure_broadcast_reads(conn)
                         row = conn.execute(
-                            "SELECT COUNT(*) as cnt FROM messages WHERE (to_agent=? OR to_agent='__broadcast__') AND read=0",
-                            (aid,),
+                            """SELECT COUNT(*) as cnt FROM messages
+                               WHERE (to_agent=? AND read=0)
+                                  OR (to_agent='__broadcast__'
+                                      AND id NOT IN (
+                                          SELECT msg_id FROM broadcast_reads WHERE agent_id=?))""",
+                            (aid, aid),
                         ).fetchone()
                     unread = row["cnt"] if row else 0
                 except Exception as e:

@@ -167,9 +167,17 @@ def broadcast(from_agent: str, content: str):
 def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
     r = get_conn()
     inbox_key = f"{REDIS_PREFIX}inbox:{agent_id}"
+    # Broadcasts are one shared msg hash fanned out to every inbox, so a global
+    # `read` bit can't represent per-recipient read state: the first agent to
+    # read would mark it read for everyone. Track broadcast reads per agent.
+    bcast_read_key = f"{REDIS_PREFIX}bcast_read:{agent_id}"
+    already_bcast = set(r.smembers(bcast_read_key))
+
     msg_ids = r.lrange(inbox_key, 0, -1)
     msgs = []
     read_mids = []
+    new_direct_read = []
+    new_bcast_read = []
     for mid in msg_ids:
         data = r.hgetall(f"{REDIS_PREFIX}msg:{mid}")
         if not data:
@@ -177,18 +185,28 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
         data["id"] = int(data["id"])
         data["created_at"] = float(data["created_at"])
         data["read"] = int(data["read"])
-        if unread_only and data["read"] == 1:
+        is_bcast = data["to_agent"] == "__broadcast__"
+        already_read = (mid in already_bcast) if is_bcast else (data["read"] == 1)
+        if unread_only and already_read:
             continue
         msgs.append(data)
         read_mids.append(mid)
+        (new_bcast_read if is_bcast else new_direct_read).append(mid)
 
     # Mark read and clean up in a pipeline to avoid partial state (P2: message loss)
     if read_mids:
         pipe = r.pipeline(transaction=True)
-        for mid in read_mids:
+        # Direct messages live in exactly one inbox, so a shared read bit is safe.
+        for mid in new_direct_read:
             pipe.hset(f"{REDIS_PREFIX}msg:{mid}", "read", "1")
+        # Broadcasts: record read state against THIS agent only.
+        if new_bcast_read:
+            pipe.sadd(bcast_read_key, *new_bcast_read)
+            pipe.expire(bcast_read_key, MSG_TTL)
         if unread_only:
-            # Remove only the messages we actually read, not the whole inbox
+            # Remove everything we just read (direct AND broadcast) from this
+            # agent's inbox, so the watcher's llen-based check stops kicking us
+            # for messages we've already handled.
             for mid in read_mids:
                 pipe.lrem(inbox_key, 1, mid)
         pipe.execute()

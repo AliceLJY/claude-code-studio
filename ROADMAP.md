@@ -1,5 +1,9 @@
 # Claude Code Studio — Roadmap
 
+> **These are exploratory ideas, not commitments.** This is a lightly-used
+> personal project. v0.1–v0.2 are done; everything from v0.3 on is paused until
+> there's a real end-to-end use that justifies building further.
+
 ## v0.1 ✅ Done (2026-03-30)
 - [x] MCP Server (FastMCP + SSE)
 - [x] Agent register/unregister/heartbeat

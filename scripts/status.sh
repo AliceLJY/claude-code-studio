@@ -6,7 +6,7 @@ set -euo pipefail
 
 STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$STUDIO_DIR/.venv/bin"
-BACKEND="${STUDIO_BACKEND:-redis}"
+BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, zero-dependency) or redis
 
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'

@@ -2,6 +2,10 @@
 
 > Multi-session collaboration studio for Claude Code. Run multiple CC instances as a coordinated team.
 
+> **Status — experimental / personal project.** A working technical demo of
+> multi-session MCP coordination, not a hardened production tool. It runs, but
+> it is lightly used; treat the roadmap below as exploration, not commitments.
+
 Claude Code Studio turns multiple Claude Code CLI sessions into a collaborative team. One session dispatches tasks, others execute — and everyone communicates through a shared MCP server with **real-time message delivery** via Redis pub/sub.
 
 ```
@@ -56,7 +60,7 @@ All through MCP tools that every Claude Code session can call natively.
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - tmux or [zellij](https://zellij.dev) (either one works)
-- Redis (Docker: `docker run -d -p 6379:6379 redis:7-alpine`)
+- Redis — **optional**, only for real-time pub/sub delivery (Docker: `docker run -d -p 6379:6379 redis:7-alpine`). The default SQLite backend needs nothing extra.
 - Claude Code CLI
 
 ### Install
@@ -87,7 +91,7 @@ This will:
 4. Auto-start `claude` in every window
 5. Each Claude auto-registers itself on startup
 
-**You just sit in the commander window and talk.** That's it.
+Sit in the commander window and talk — each agent auto-registers via the project `CLAUDE.md` once its MCP connection is up.
 
 ### Check Status (CLI)
 
@@ -98,7 +102,7 @@ This will:
 
 ### Connect Claude Code
 
-The MCP server is auto-configured if you run Claude Code from the project directory. For other directories, add to your `~/.claude.json`:
+Add the studio MCP server to your Claude Code config (the launcher does not register it for you). For example, in `~/.claude.json`:
 
 ```json
 {
@@ -161,7 +165,7 @@ No window switching needed. Messages flow automatically.
 - **MCP Server**: FastMCP with SSE transport — multiple CC sessions connect to one server
 - **Redis**: Message storage + pub/sub for instant delivery. Messages TTL 24h, tasks TTL 72h.
 - **Watcher**: Subscribes to Redis pub/sub, auto-sends prompts to idle agent tmux windows
-- **SQLite fallback**: Set `STUDIO_BACKEND=sqlite` if you don't have Redis
+- **Backend**: SQLite by default (zero-dependency). Set `STUDIO_BACKEND=redis` for real-time pub/sub delivery (requires a running Redis)
 
 ## MCP Tools
 
@@ -185,10 +189,11 @@ No window switching needed. Messages flow automatically.
 |---------------------|---------|-------------|
 | `STUDIO_HOST` | `localhost` | MCP server bind address |
 | `STUDIO_PORT` | `3777` | MCP server port |
-| `STUDIO_BACKEND` | `redis` | Storage backend: `redis` or `sqlite` |
+| `STUDIO_BACKEND` | `sqlite` | Storage backend: `sqlite` (zero-dep) or `redis` (real-time pub/sub) |
 | `STUDIO_REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `STUDIO_MUX` | `tmux` | Terminal multiplexer: `tmux` or `zellij` |
 | `STUDIO_DB_PATH` | `~/.claude-code-studio/studio.db` | SQLite database path (sqlite mode) |
+| `STUDIO_AUTO_KICK` | `1` | Set to `0` to stop the watcher from auto-kicking agents (the idle heuristic can misfire) |
 
 ## Cross-Machine Setup
 
@@ -204,6 +209,12 @@ STUDIO_REDIS_URL=redis://192.168.1.100:6379 ./scripts/launch.sh 3
 
 All agents across both machines share the same message bus and task board.
 
+> **Known limitations (experimental).** Agent IDs are fixed (`commander`,
+> `agent-1`, …), so two machines launched this way collide on the same IDs in
+> Redis and overwrite each other's state — there is no real per-machine
+> isolation yet. The launcher's Redis also binds to `0.0.0.0` with no auth, so
+> only do this on a trusted network.
+
 ## Comparison with Existing Tools
 
 | Feature | claude-code-studio | mcp_agent_mail | session-bridge | claude-swarm |
@@ -213,7 +224,7 @@ All agents across both machines share the same message bus and task board.
 | Auto-wake agents | Yes (watcher) | No | No | No |
 | Task dispatch + tracking | Yes | No | No | Yes |
 | One-click launch | Yes | No | No | Yes |
-| Cross-machine | Yes (Redis) | Yes (Git) | No | No |
+| Cross-machine | Experimental | Yes (Git) | No | No |
 | No external deps | SQLite mode | Git + SQLite | Files only | Various |
 
 ## Cross-Model Collaboration

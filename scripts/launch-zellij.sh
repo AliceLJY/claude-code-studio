@@ -10,7 +10,7 @@ STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SESSION="studio"
 HOST="${STUDIO_HOST:-localhost}"
 PORT="${STUDIO_PORT:-3777}"
-BACKEND="${STUDIO_BACKEND:-redis}"
+BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, zero-dependency) or redis
 VENV="$STUDIO_DIR/.venv/bin"
 AGENT_COUNT="${1:-3}"
 LAYOUT_FILE="/tmp/studio-layout.kdl"
@@ -36,6 +36,17 @@ if lsof -ti:"$PORT" >/dev/null 2>&1; then
     echo "Killing old MCP server on port $PORT..."
     kill "$(lsof -ti:"$PORT")" 2>/dev/null || true
     sleep 1
+fi
+
+# ── 1c. Preflight: if redis backend requested, verify it's reachable ──
+if [ "$BACKEND" = "redis" ]; then
+    if ! "$VENV/python" -c "import os,redis; redis.Redis.from_url(os.environ.get('STUDIO_REDIS_URL','redis://localhost:6379'), socket_connect_timeout=2).ping()" 2>/dev/null; then
+        echo "ERROR: STUDIO_BACKEND=redis but Redis is unreachable at ${STUDIO_REDIS_URL:-redis://localhost:6379}." >&2
+        echo "  Start it:  docker run -d -p 6379:6379 redis:7-alpine" >&2
+        echo "  Or use the zero-dependency default:  STUDIO_BACKEND=sqlite $0 $*" >&2
+        exit 1
+    fi
+    echo -e "${GREEN}Redis reachable.${NC}"
 fi
 
 # ── 2. Start MCP server in background ──────────────
