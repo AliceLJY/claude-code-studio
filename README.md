@@ -6,7 +6,7 @@
 > multi-session MCP coordination, not a hardened production tool. It runs, but
 > it is lightly used; treat the roadmap below as exploration, not commitments.
 
-Claude Code Studio turns multiple Claude Code CLI sessions into a collaborative team. One session dispatches tasks, others execute — and everyone communicates through a shared MCP server with **real-time message delivery** via Redis pub/sub.
+Claude Code Studio turns multiple Claude Code CLI sessions into a collaborative team. One session dispatches tasks, others execute, and everyone communicates through a shared MCP server. SQLite is the default state backend; Redis adds pub/sub delivery.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -23,7 +23,7 @@ Claude Code Studio turns multiple Claude Code CLI sessions into a collaborative 
 │   Agent B → Agent A: "Got it, updating"      │
 │                                              │
 │            ┌──────────────┐                  │
-│            │  Redis + MCP │ ← pub/sub bus    │
+│            │  State + MCP │ ← messages       │
 │            │  Server      │    + task board   │
 │            └──────────────┘                  │
 └─────────────────────────────────────────────┘
@@ -33,7 +33,7 @@ Claude Code Studio turns multiple Claude Code CLI sessions into a collaborative 
 
 You're researching 5 projects across 5 Claude Code sessions. Halfway through, you realize they depend on each other. Now you need them to **talk**.
 
-Existing solutions solve pieces of this (messaging, file locks, task queues) but none deliver the full experience:
+This experiment combines four things in one small local tool:
 
 - **Dispatch tasks** from a commander to worker agents
 - **Exchange messages** between any agents (peer-to-peer, not just hub-and-spoke)
@@ -44,14 +44,14 @@ All through MCP tools that every Claude Code session can call natively.
 
 ## Features
 
-- **One-click launch** — single script starts MCP server, watcher daemon, and tmux windows with Claude Code auto-started in each
-- **Real-time messaging** — Redis pub/sub delivers messages instantly, watcher auto-kicks idle agents
+- **One-click launch** — one script starts the MCP server, watcher daemon, and tmux or Zellij panes with Claude Code auto-started in each
+- **Optional real-time messaging** — Redis pub/sub delivers notifications instantly; SQLite mode polls every five seconds
 - **Peer-to-peer** — any agent can message any other agent, not just commander → worker
 - **Task dispatch & tracking** — assign tasks with priority, track status, auto-notify on completion
 - **Auto-registration** — agents register themselves on startup via project CLAUDE.md
-- **Cross-machine ready** — point `STUDIO_REDIS_URL` at a remote Redis and run agents on different machines
+- **Experimental cross-machine state** — multiple machines can share Redis, with the identity-collision limitations documented below
 - **CLI status tool** — check studio status from terminal without entering Claude Code
-- **Cross-model review** — OpenAI's official [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) works inside the studio, letting Codex (GPT-5.4) review code written by Claude — two competing AI companies' models collaborating in one workspace
+- **Cross-model compatibility** — ordinary Claude Code panes can keep using compatible plugins such as [codex-plugin-cc](https://github.com/openai/codex-plugin-cc)
 
 ## Quick Start
 
@@ -60,7 +60,7 @@ All through MCP tools that every Claude Code session can call natively.
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - tmux or [zellij](https://zellij.dev) (either one works)
-- Redis — **optional**, only for real-time pub/sub delivery (Docker: `docker run -d -p 6379:6379 redis:7-alpine`). The default SQLite backend needs nothing extra.
+- Redis — **optional**, only for real-time pub/sub delivery (local Docker: `docker run -d -p 127.0.0.1:6379:6379 redis:7-alpine`). The default SQLite backend needs no external datastore.
 - Claude Code CLI
 
 ### Install
@@ -72,6 +72,8 @@ uv venv && uv pip install -e .
 ```
 
 ### Launch
+
+Configure the MCP connection once (see [Connect Claude Code](#connect-claude-code)) before the first launch.
 
 ```bash
 # Launch studio with 1 commander + 3 agent windows (default)
@@ -87,7 +89,7 @@ STUDIO_MUX=zellij ./scripts/launch.sh
 This will:
 1. Start the MCP server on `localhost:3777`
 2. Start the watcher daemon (auto-kicks agents on new messages)
-3. Create a tmux session with separate windows
+3. Create a tmux or Zellij session with separate panes
 4. Auto-start `claude` in every window
 5. Each Claude auto-registers itself on startup
 
@@ -102,23 +104,18 @@ Sit in the commander window and talk — each agent auto-registers via the proje
 
 ### Connect Claude Code
 
-Add the studio MCP server to your Claude Code config (the launcher does not register it for you). For example, in `~/.claude.json`:
+From the repository directory, add the Studio server to Claude Code's local project scope (the launcher does not write this configuration):
 
-```json
-{
-  "mcpServers": {
-    "claude-code-studio": {
-      "type": "sse",
-      "url": "http://localhost:3777/sse"
-    }
-  }
-}
+```bash
+claude mcp add --transport sse --scope local claude-code-studio http://localhost:3777/sse
 ```
+
+Claude Code still supports SSE, but its [MCP documentation](https://code.claude.com/docs/en/mcp#option-2-add-a-remote-sse-server) now marks SSE as deprecated in favor of Streamable HTTP. Studio retains SSE for v0.3 compatibility; a transport migration should be a separate release rather than an undocumented endpoint change.
 
 ## How It Works
 
 ```
-You say: "Tell agent-1 to research MCP frameworks"
+Redis mode example — you say: "Tell agent-1 to research MCP frameworks"
 
 Commander CC                    Watcher Daemon              Agent-1 CC
      │                               │                          │
@@ -139,7 +136,7 @@ Commander CC                    Watcher Daemon              Agent-1 CC
      │                               │                                  │
 ```
 
-No window switching needed. Messages flow automatically.
+In SQLite mode the watcher polls instead of subscribing to Redis. Auto-wake is best-effort in both modes because terminal-idle detection is heuristic.
 
 ## Architecture
 
@@ -157,15 +154,15 @@ No window switching needed. Messages flow automatically.
            └───────┬────────┘
                    │
            ┌───────▼────────┐     ┌──────────────┐
-           │     Redis      │◄───►│   Watcher    │
-           │  pub/sub + KV  │     │  (auto-kick) │
+           │ SQLite / Redis │◄───►│   Watcher    │
+           │  state backend │     │  (auto-kick) │
            └────────────────┘     └──────────────┘
 ```
 
 - **MCP Server**: FastMCP with SSE transport — multiple CC sessions connect to one server
 - **Redis**: Message storage + pub/sub for instant delivery. Messages TTL 24h, tasks TTL 72h.
-- **Watcher**: Subscribes to Redis pub/sub, auto-sends prompts to idle agent tmux windows
-- **Backend**: SQLite by default (zero-dependency). Set `STUDIO_BACKEND=redis` for real-time pub/sub delivery (requires a running Redis)
+- **Watcher**: Subscribes to Redis pub/sub or polls SQLite, then auto-sends prompts to panes it believes are idle
+- **Backend**: SQLite by default (no external datastore). Set `STUDIO_BACKEND=redis` for real-time pub/sub delivery (requires a running Redis)
 
 ## MCP Tools
 
@@ -174,12 +171,12 @@ No window switching needed. Messages flow automatically.
 | `register` | Join the studio with a unique ID and role |
 | `unregister` | Leave the studio |
 | `send_message` | Direct message another agent |
-| `broadcast` | Message all agents |
+| `broadcast` | Message all other registered agents |
 | `check_inbox` | Read your messages |
 | `dispatch_task` | Assign a task to an agent (auto-notifies) |
 | `update_task` | Update task status (auto-notifies dispatcher) |
 | `my_tasks` | List your assigned tasks |
-| `studio_status` | Full dashboard: agents, tasks, activity |
+| `studio_status` | Current agents and task board |
 | `kick` | Wake up an agent remotely via tmux |
 | `heartbeat` | Signal you're still active |
 
@@ -189,11 +186,16 @@ No window switching needed. Messages flow automatically.
 |---------------------|---------|-------------|
 | `STUDIO_HOST` | `localhost` | MCP server bind address |
 | `STUDIO_PORT` | `3777` | MCP server port |
-| `STUDIO_BACKEND` | `sqlite` | Storage backend: `sqlite` (zero-dep) or `redis` (real-time pub/sub) |
+| `STUDIO_BACKEND` | `sqlite` | Storage backend: `sqlite` (no external service) or `redis` (real-time pub/sub) |
 | `STUDIO_REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `STUDIO_MUX` | `tmux` | Terminal multiplexer: `tmux` or `zellij` |
 | `STUDIO_DB_PATH` | `~/.claude-code-studio/studio.db` | SQLite database path (sqlite mode) |
 | `STUDIO_AUTO_KICK` | `1` | Set to `0` to stop the watcher from auto-kicking agents (the idle heuristic can misfire) |
+| `STUDIO_UNSAFE_REMOTE_MCP` | unset | Explicit opt-in required before binding the unauthenticated MCP server to a non-loopback host |
+
+## Security Model
+
+Studio assumes one trusted user on one machine or trusted private network. The MCP endpoint has no authentication, tool-supplied agent identities are not cryptographically verified, and `kick` can type a prompt into a managed terminal pane. The server therefore refuses a non-loopback `STUDIO_HOST` unless `STUDIO_UNSAFE_REMOTE_MCP=1` is explicitly set. Do not expose the MCP or Redis ports to the public internet.
 
 ## Cross-Machine Setup
 
@@ -201,10 +203,10 @@ Run agents on different machines by pointing to a shared Redis:
 
 ```bash
 # Machine A (your Mac)
-STUDIO_REDIS_URL=redis://192.168.1.100:6379 ./scripts/launch.sh
+STUDIO_BACKEND=redis STUDIO_REDIS_URL=redis://192.168.1.100:6379 ./scripts/launch.sh
 
 # Machine B (Mac Mini)
-STUDIO_REDIS_URL=redis://192.168.1.100:6379 ./scripts/launch.sh 3
+STUDIO_BACKEND=redis STUDIO_REDIS_URL=redis://192.168.1.100:6379 ./scripts/launch.sh 3
 ```
 
 All agents across both machines share the same message bus and task board.
@@ -212,53 +214,39 @@ All agents across both machines share the same message bus and task board.
 > **Known limitations (experimental).** Agent IDs are fixed (`commander`,
 > `agent-1`, …), so two machines launched this way collide on the same IDs in
 > Redis and overwrite each other's state — there is no real per-machine
-> isolation yet. The launcher's Redis also binds to `0.0.0.0` with no auth, so
-> only do this on a trusted network.
+> isolation yet. For cross-machine use, configure Redis authentication, network
+> filtering, and encryption appropriate to your network; the local Docker command
+> above intentionally listens on loopback only.
 
-## Comparison with Existing Tools
+## Positioning
 
-| Feature | claude-code-studio | mcp_agent_mail | session-bridge | claude-swarm |
-|---------|-------------------|----------------|----------------|--------------|
-| Peer-to-peer messaging | Yes | Yes | 2 agents only | No |
-| Real-time delivery | Yes (Redis pub/sub) | No (polling) | No | No |
-| Auto-wake agents | Yes (watcher) | No | No | No |
-| Task dispatch + tracking | Yes | No | No | Yes |
-| One-click launch | Yes | No | No | Yes |
-| Cross-machine | Experimental | Yes (Git) | No | No |
-| No external deps | SQLite mode | Git + SQLite | Files only | Various |
+Studio is a small trusted-local coordination demo, not a secure multi-tenant agent platform. Its useful combination is MCP messaging, a task board, terminal-pane launch, and best-effort auto-wake. It does **not** provide shared model context, strong agent identity, authorization, file locks, or durable workflow orchestration.
 
 ## Cross-Model Collaboration
 
-Claude Code Studio naturally supports cross-model workflows. With OpenAI's official [codex-plugin-cc](https://github.com/openai/codex-plugin-cc), you can have Codex (GPT-5.4) review code written by Claude agents — right inside the studio.
+Studio does not integrate with Codex directly. Each pane is an ordinary Claude Code session, so compatible Claude Code plugins such as [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) can still be used for a cross-model review workflow. Follow the plugin's own README for its current installation and command names.
 
 ```
 ┌─────────────────────────────────────────────────┐
 │              CLAUDE CODE STUDIO                  │
 │                                                  │
-│   Claude (Opus)     writes code                  │
+│   Claude            writes code                  │
 │       │                                          │
 │       ▼                                          │
-│   Codex (GPT-5.4)   reviews code (/codex:review)│
+│   Codex             reviews code                │
 │       │                                          │
 │       ▼                                          │
-│   Claude (Opus)     verifies findings & fixes    │
+│   Claude            verifies findings & fixes    │
 │                                                  │
-│   Two competing AI companies' models,            │
-│   collaborating in one workspace.                │
+│   Review stays in the same workspace.             │
 └─────────────────────────────────────────────────┘
 ```
 
-Install the plugin:
-```bash
-claude plugins marketplace add openai/codex-plugin-cc
-claude plugins install codex@openai-codex
-```
-
-Then use `/codex:review`, `/codex:adversarial-review`, or `/codex:rescue` inside any studio session.
+This compatibility is inherited from Claude Code; Studio itself adds no Codex-specific transport or routing.
 
 ## Ecosystem
 
-Part of the **小试AI** open-source AI workflow:
+Part of AliceLJY's open-source AI workflow:
 
 | Project | Description |
 |---------|-------------|
@@ -272,6 +260,14 @@ Part of the **小试AI** open-source AI workflow:
 ## License
 
 MIT
+
+## Development
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q studio tests
+bash -n scripts/launch.sh scripts/launch-zellij.sh scripts/status.sh
+```
 
 ## Contributing
 

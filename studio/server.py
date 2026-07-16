@@ -5,6 +5,7 @@ to communicate, coordinate tasks, and collaborate as a team.
 """
 
 import datetime
+import ipaddress
 import logging
 import os
 import subprocess
@@ -17,8 +18,10 @@ logger = logging.getLogger(__name__)
 _backend = os.environ.get("STUDIO_BACKEND", "sqlite")
 if _backend == "redis":
     from studio import db_redis as db
-else:
+elif _backend == "sqlite":
     from studio import db
+else:
+    db = None
 
 mcp = FastMCP(
     "Claude Code Studio",
@@ -41,6 +44,16 @@ def _agent_status_icon(status: str) -> str:
     return {"online": "[ONLINE]", "offline": "[OFFLINE]", "busy": "[BUSY]"}.get(status, "[?]")
 
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]")
+    if normalized.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 # ── Agent lifecycle ─────────────────────────────────────
 
 @mcp.tool()
@@ -53,6 +66,11 @@ def register(agent_id: str, name: str, role: str = "", project_dir: str = "") ->
         role: What this agent is responsible for
         project_dir: Working directory of this agent's project
     """
+    agent_id = agent_id.strip()
+    if not agent_id:
+        return "Error: agent_id cannot be empty."
+    if agent_id == "__broadcast__":
+        return "Error: '__broadcast__' is reserved for internal message routing."
     db.register_agent(agent_id, name, role, project_dir)
     agents = db.list_agents()
     online = [a for a in agents if a["status"] == "online"]
@@ -101,14 +119,14 @@ def send_message(from_agent: str, to_agent: str, content: str) -> str:
 
 @mcp.tool()
 def broadcast(from_agent: str, content: str) -> str:
-    """Send a message to ALL agents in the studio.
+    """Send a message to all other registered agents in the studio.
 
     Args:
         from_agent: Your agent ID
         content: Message content (markdown supported)
     """
     db.broadcast(from_agent, content)
-    return "Broadcast sent to all agents."
+    return "Broadcast sent to all other agents."
 
 
 @mcp.tool()
@@ -183,14 +201,18 @@ def update_task(task_id: int, status: str, notes: str = "") -> str:
         return f"Task #{task_id} not found."
     db.update_task(task_id, status, notes)
     # auto-notify the person who dispatched this task
-    if task["assigned_by"] and task["assigned_by"] != task["assigned_to"]:
+    notified = bool(task["assigned_by"] and task["assigned_by"] != task["assigned_to"])
+    if notified:
         notes_str = f"\n\nNotes: {notes}" if notes else ""
         db.send_message(
             task["assigned_to"],
             task["assigned_by"],
             f"**Task #{task_id} → {status.upper()}**: {task['title']}{notes_str}",
         )
-    return f"Task #{task_id} updated to '{status}'. Notified '{task['assigned_by']}'."
+    result = f"Task #{task_id} updated to '{status}'."
+    if notified:
+        result += f" Notified '{task['assigned_by']}'."
+    return result
 
 
 @mcp.tool()
@@ -216,7 +238,7 @@ def my_tasks(agent_id: str) -> str:
 
 @mcp.tool()
 def studio_status() -> str:
-    """Get full overview of the studio: who's online, all tasks, recent messages.
+    """Get an overview of registered agents and the task board.
     Use this to understand the big picture.
     """
     agents = db.list_agents()
@@ -298,11 +320,15 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
-    # P2: Server startup error handling -- log and exit cleanly on fatal errors
+    if db is None:
+        logger.error("Invalid STUDIO_BACKEND=%r; expected 'sqlite' or 'redis'", _backend)
+        raise SystemExit(2)
+
+    # Server startup error handling -- log and exit cleanly on fatal errors
     try:
         db.init_db()
     except Exception as exc:
-        logger.error("Failed to initialize database: %s", exc, exc_info=True)
+        logger.error("Failed to initialize database (%s)", type(exc).__name__)
         raise SystemExit(1) from exc
 
     host = os.environ.get("STUDIO_HOST", "localhost")
@@ -312,6 +338,20 @@ def main():
     except ValueError:
         logger.error("Invalid STUDIO_PORT value: %r (must be integer)", port_str)
         raise SystemExit(1)
+    if not 1 <= port <= 65535:
+        logger.error("Invalid STUDIO_PORT value: %r (must be 1-65535)", port_str)
+        raise SystemExit(1)
+
+    allow_remote = os.environ.get("STUDIO_UNSAFE_REMOTE_MCP", "").lower() in ("1", "true", "yes")
+    if not _is_loopback_host(host) and not allow_remote:
+        logger.error(
+            "Refusing unauthenticated MCP bind on non-loopback host %r. "
+            "Keep STUDIO_HOST local or explicitly set STUDIO_UNSAFE_REMOTE_MCP=1.",
+            host,
+        )
+        raise SystemExit(1)
+    if allow_remote and not _is_loopback_host(host):
+        logger.warning("Unsafe remote MCP bind explicitly enabled; this server has no authentication")
 
     logger.info("Starting Claude Code Studio on %s:%d (backend=%s)", host, port, _backend)
     mcp.run(transport="sse", host=host, port=port)

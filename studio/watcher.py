@@ -56,7 +56,7 @@ def is_agent_idle(agent_id: str) -> bool:
     return any(last_line.endswith(ind) for ind in idle_indicators)
 
 
-def kick_agent(agent_id: str):
+def kick_agent(agent_id: str) -> bool:
     """Send a prompt to the agent's pane (best-effort auto-wake).
 
     Honors STUDIO_AUTO_KICK as a final guard so a misfiring idle-heuristic can
@@ -64,10 +64,11 @@ def kick_agent(agent_id: str):
     """
     if not AUTO_KICK:
         logger.info("Auto-kick disabled (STUDIO_AUTO_KICK=0); not kicking %s", agent_id)
-        return
+        return False
     prompt = "You have new messages. Check inbox and handle them."
     mux.send_keys(agent_id, prompt)
     mux.send_enter(agent_id)
+    return True
 
 
 # ── Redis pub/sub mode ──────────────────────────────────
@@ -86,9 +87,9 @@ def _try_kick(agent_id: str, kicked: dict[str, float], cooldown: int, reason: st
         return False
     if is_agent_idle(agent_id):
         logger.info("Kicking %s (%s)", agent_id, reason)
-        kick_agent(agent_id)
-        kicked[agent_id] = time.time()
-        return True
+        if kick_agent(agent_id):
+            kicked[agent_id] = time.time()
+            return True
     return False
 
 
@@ -122,7 +123,7 @@ def run_redis():
                     if inbox_len > 0:
                         _try_kick(aid, kicked, cooldown, "fallback poll")
             except redis_lib.ConnectionError as e:
-                logger.warning("Fallback poll Redis connection error: %s", e)
+                logger.warning("Fallback poll Redis connection error (%s)", type(e).__name__)
             except Exception as e:
                 logger.error("Fallback poll error: %s", e, exc_info=True)
 
@@ -181,23 +182,8 @@ def run_sqlite():
                 if aid not in panes:
                     continue
 
-                # P1 Fix 5: Use managed connection to prevent leaks
                 try:
-                    with db._managed_conn() as conn:
-                        # Broadcast read state lives in broadcast_reads (per
-                        # agent), NOT messages.read — which for broadcasts is
-                        # never set, so counting `read=0` alone would treat every
-                        # past broadcast as forever-unread and kick endlessly.
-                        db._ensure_broadcast_reads(conn)
-                        row = conn.execute(
-                            """SELECT COUNT(*) as cnt FROM messages
-                               WHERE (to_agent=? AND read=0)
-                                  OR (to_agent='__broadcast__'
-                                      AND id NOT IN (
-                                          SELECT msg_id FROM broadcast_reads WHERE agent_id=?))""",
-                            (aid, aid),
-                        ).fetchone()
-                    unread = row["cnt"] if row else 0
+                    unread = db.count_unread(aid)
                 except Exception as e:
                     logger.warning("Failed to check unread for %s: %s", aid, e)
                     continue

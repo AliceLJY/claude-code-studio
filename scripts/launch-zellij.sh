@@ -10,11 +10,34 @@ STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SESSION="studio"
 HOST="${STUDIO_HOST:-localhost}"
 PORT="${STUDIO_PORT:-3777}"
-BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, zero-dependency) or redis
+BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, no external datastore) or redis
 VENV="$STUDIO_DIR/.venv/bin"
 AGENT_COUNT="${1:-3}"
 LAYOUT_FILE="/tmp/studio-layout.kdl"
 PANE_MAP="/tmp/studio-zellij-panes.json"
+
+case "$BACKEND" in
+    sqlite|redis) ;;
+    *) echo "ERROR: STUDIO_BACKEND must be 'sqlite' or 'redis' (got '$BACKEND')." >&2; exit 2 ;;
+esac
+if ! [[ "$AGENT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: agent count must be a positive integer (got '$AGENT_COUNT')." >&2
+    exit 2
+fi
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "ERROR: STUDIO_PORT must be an integer from 1 to 65535 (got '$PORT')." >&2
+    exit 2
+fi
+case "$HOST" in
+    localhost|127.*|::1|\[::1\]) ;;
+    *)
+        if [[ ! "${STUDIO_UNSAFE_REMOTE_MCP:-}" =~ ^(1|true|yes)$ ]]; then
+            echo "ERROR: refusing unauthenticated MCP bind on non-loopback host '$HOST'." >&2
+            echo "  Keep STUDIO_HOST local or explicitly set STUDIO_UNSAFE_REMOTE_MCP=1." >&2
+            exit 2
+        fi
+        ;;
+esac
 
 # Colors
 GREEN='\033[0;32m'
@@ -25,28 +48,28 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  Claude Code Studio — Zellij Mode    ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
 
-# ── 1. Kill old studio if running ───────────────────
-if zellij list-sessions -n -s 2>/dev/null | grep -q "^${SESSION}$"; then
-    echo "Existing zellij studio session found. Killing it..."
-    zellij delete-session "$SESSION" --force 2>/dev/null || true
-fi
-
-# Kill old MCP server if running
-if lsof -ti:"$PORT" >/dev/null 2>&1; then
-    echo "Killing old MCP server on port $PORT..."
-    kill "$(lsof -ti:"$PORT")" 2>/dev/null || true
-    sleep 1
+LISTENER_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -n "$LISTENER_PIDS" ]; then
+    echo "ERROR: port $PORT is already in use by PID(s): ${LISTENER_PIDS//$'\n'/, }." >&2
+    echo "  Stop the existing service or choose another STUDIO_PORT." >&2
+    exit 1
 fi
 
 # ── 1c. Preflight: if redis backend requested, verify it's reachable ──
 if [ "$BACKEND" = "redis" ]; then
     if ! "$VENV/python" -c "import os,redis; redis.Redis.from_url(os.environ.get('STUDIO_REDIS_URL','redis://localhost:6379'), socket_connect_timeout=2).ping()" 2>/dev/null; then
-        echo "ERROR: STUDIO_BACKEND=redis but Redis is unreachable at ${STUDIO_REDIS_URL:-redis://localhost:6379}." >&2
-        echo "  Start it:  docker run -d -p 6379:6379 redis:7-alpine" >&2
-        echo "  Or use the zero-dependency default:  STUDIO_BACKEND=sqlite $0 $*" >&2
+        echo "ERROR: STUDIO_BACKEND=redis but the configured Redis endpoint is unreachable." >&2
+        echo "  Start it locally: docker run -d -p 127.0.0.1:6379:6379 redis:7-alpine" >&2
+        echo "  Or use the no-service default: STUDIO_BACKEND=sqlite $0 $*" >&2
         exit 1
     fi
     echo -e "${GREEN}Redis reachable.${NC}"
+fi
+
+# ── 1. Replace the named Studio multiplexer session ─────
+if zellij list-sessions -n -s 2>/dev/null | grep -q "^${SESSION}$"; then
+    echo "Existing zellij studio session found. Replacing it..."
+    zellij delete-session "$SESSION" --force 2>/dev/null || true
 fi
 
 # ── 2. Start MCP server in background ──────────────
@@ -56,9 +79,24 @@ STUDIO_HOST="$HOST" STUDIO_PORT="$PORT" STUDIO_BACKEND="$BACKEND" \
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 
+cleanup_on_failure() {
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ -z "${WATCHER_PID:-}" ] || kill "$WATCHER_PID" >/dev/null 2>&1 || true
+        kill "$SERVER_PID" >/dev/null 2>&1 || true
+        zellij delete-session "$SESSION" --force >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_on_failure EXIT
+
 # Wait for server to be ready
 for i in $(seq 1 10); do
-    if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 || lsof -ti:"$PORT" >/dev/null 2>&1; then
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+        echo "ERROR: MCP server exited during startup. Check /tmp/studio-server.log" >&2
+        exit 1
+    fi
+    if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 \
+        || lsof -a -p "$SERVER_PID" -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo -e "${GREEN}MCP server is ready.${NC}"
         break
     fi
@@ -144,6 +182,8 @@ done
 echo ""
 echo "  Detach: Ctrl+O, D"
 echo "  Reattach: zellij attach $SESSION"
+echo "  Configure Claude Code once from this repository:"
+echo "    claude mcp add --transport sse --scope local claude-code-studio http://$HOST:$PORT/sse"
 echo ""
 
 # ── 7. Launch zellij (blocks until detach) ─────────

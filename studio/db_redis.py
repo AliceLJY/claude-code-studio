@@ -21,12 +21,6 @@ TASK_TTL = 3600 * 72  # tasks expire after 72h
 
 _pool: redis.ConnectionPool | None = None
 
-# Exponential backoff state for Redis reconnection (P2)
-_backoff_attempt: int = 0
-_BACKOFF_BASE: float = 1.0
-_BACKOFF_MAX: float = 60.0
-
-
 def _get_pool() -> redis.ConnectionPool:
     global _pool
     if _pool is None:
@@ -54,24 +48,15 @@ def get_conn() -> redis.Redis:
 
 
 def init_db():
-    """Test Redis connection. Logs a warning instead of crashing if Redis is down."""
-    global _backoff_attempt
+    """Verify Redis before serving requests; a dead backend is a fatal startup error."""
     try:
         r = get_conn()
         r.ping()
-        _backoff_attempt = 0  # reset on success
-        logger.info("Redis connection OK (%s)", REDIS_URL)
-    except redis.ConnectionError as exc:
-        _backoff_attempt += 1
-        wait = min(_BACKOFF_BASE * (2 ** (_backoff_attempt - 1)), _BACKOFF_MAX)
-        logger.warning(
-            "Redis unavailable at %s (attempt %d, next retry in %.1fs): %s",
-            REDIS_URL, _backoff_attempt, wait, exc,
-        )
-        _reset_pool()
+        logger.info("Redis connection OK")
     except redis.RedisError as exc:
-        logger.warning("Redis error during init: %s", exc)
         _reset_pool()
+        logger.error("Redis initialization failed (%s)", type(exc).__name__)
+        raise
 
 
 # ── Agents ──────────────────────────────────────────────
@@ -176,11 +161,13 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
     msg_ids = r.lrange(inbox_key, 0, -1)
     msgs = []
     read_mids = []
+    stale_mids = []
     new_direct_read = []
     new_bcast_read = []
     for mid in msg_ids:
         data = r.hgetall(f"{REDIS_PREFIX}msg:{mid}")
         if not data:
+            stale_mids.append(mid)
             continue
         data["id"] = int(data["id"])
         data["created_at"] = float(data["created_at"])
@@ -194,8 +181,10 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
         (new_bcast_read if is_bcast else new_direct_read).append(mid)
 
     # Mark read and clean up in a pipeline to avoid partial state (P2: message loss)
-    if read_mids:
+    if read_mids or stale_mids:
         pipe = r.pipeline(transaction=True)
+        for mid in stale_mids:
+            pipe.lrem(inbox_key, 0, mid)
         # Direct messages live in exactly one inbox, so a shared read bit is safe.
         for mid in new_direct_read:
             pipe.hset(f"{REDIS_PREFIX}msg:{mid}", "read", "1")
@@ -240,9 +229,11 @@ def create_task(title: str, description: str, assigned_to: str, assigned_by: str
         "updated_at": now,
     }
     task_key = f"{REDIS_PREFIX}task:{task_id}"
-    r.hset(task_key, mapping={k: str(v) for k, v in task.items()})
-    r.expire(task_key, TASK_TTL)
-    r.rpush(f"{REDIS_PREFIX}tasks", task_id)
+    pipe = r.pipeline(transaction=True)
+    pipe.hset(task_key, mapping={k: str(v) for k, v in task.items()})
+    pipe.expire(task_key, TASK_TTL)
+    pipe.rpush(f"{REDIS_PREFIX}tasks", task_id)
+    pipe.execute()
     return task_id
 
 
@@ -256,7 +247,10 @@ def update_task(task_id: int, status: str = "", notes: str = "") -> bool:
         updates["status"] = status
     if notes:
         updates["notes"] = notes
-    r.hset(task_key, mapping=updates)
+    pipe = r.pipeline(transaction=True)
+    pipe.hset(task_key, mapping=updates)
+    pipe.expire(task_key, TASK_TTL)
+    pipe.execute()
     return True
 
 
@@ -264,9 +258,11 @@ def get_tasks(agent_id: str = "", status: str = "") -> list[dict]:
     r = get_conn()
     task_ids = r.lrange(f"{REDIS_PREFIX}tasks", 0, -1)
     tasks = []
+    stale_task_ids = []
     for tid in task_ids:
         data = r.hgetall(f"{REDIS_PREFIX}task:{tid}")
         if not data:
+            stale_task_ids.append(tid)
             continue
         data["id"] = int(data["id"])
         data["created_at"] = float(data["created_at"])
@@ -276,6 +272,11 @@ def get_tasks(agent_id: str = "", status: str = "") -> list[dict]:
         if status and data.get("status") != status:
             continue
         tasks.append(data)
+    if stale_task_ids:
+        pipe = r.pipeline(transaction=True)
+        for tid in stale_task_ids:
+            pipe.lrem(f"{REDIS_PREFIX}tasks", 0, tid)
+        pipe.execute()
     # sort by priority
     prio_order = {"high": 0, "medium": 1, "low": 2}
     tasks.sort(key=lambda t: (prio_order.get(t.get("priority", "medium"), 1), t["created_at"]))

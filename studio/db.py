@@ -1,28 +1,15 @@
 """SQLite storage layer for Claude Code Studio."""
 
-import logging
+import os
 import sqlite3
 import time
-import os
 from contextlib import contextmanager
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get(
     "STUDIO_DB_PATH",
     str(Path.home() / ".claude-code-studio" / "studio.db"),
 )
-
-# P0 Fix 4: Allowlist of valid column names for dynamic SQL
-_VALID_COLUMNS = frozenset({
-    "agent_id", "name", "role", "project_dir", "status",
-    "registered_at", "last_seen",
-    "id", "from_agent", "to_agent", "content", "created_at", "read",
-    "title", "description", "assigned_to", "assigned_by",
-    "priority", "notes", "updated_at",
-})
-
 
 def _ensure_dir():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -52,43 +39,40 @@ def _managed_conn():
 
 
 def init_db():
-    try:
-        with _managed_conn() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS agents (
-                    agent_id   TEXT PRIMARY KEY,
-                    name       TEXT NOT NULL,
-                    role       TEXT DEFAULT '',
-                    project_dir TEXT DEFAULT '',
-                    status     TEXT DEFAULT 'online',
-                    registered_at REAL NOT NULL,
-                    last_seen  REAL NOT NULL
-                );
+    with _managed_conn() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS agents (
+                agent_id   TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                role       TEXT DEFAULT '',
+                project_dir TEXT DEFAULT '',
+                status     TEXT DEFAULT 'online',
+                registered_at REAL NOT NULL,
+                last_seen  REAL NOT NULL
+            );
 
-                CREATE TABLE IF NOT EXISTS messages (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    from_agent TEXT NOT NULL,
-                    to_agent   TEXT NOT NULL,  -- agent_id or '__broadcast__'
-                    content    TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    read       INTEGER DEFAULT 0
-                );
+            CREATE TABLE IF NOT EXISTS messages (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_agent TEXT NOT NULL,
+                to_agent   TEXT NOT NULL,  -- agent_id or '__broadcast__'
+                content    TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                read       INTEGER DEFAULT 0
+            );
 
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title       TEXT NOT NULL,
-                    description TEXT DEFAULT '',
-                    assigned_to TEXT DEFAULT '',
-                    assigned_by TEXT DEFAULT '',
-                    status      TEXT DEFAULT 'pending',
-                    priority    TEXT DEFAULT 'medium',
-                    notes       TEXT DEFAULT '',
-                    created_at  REAL NOT NULL,
-                    updated_at  REAL NOT NULL
-                );
-            """)
-    except sqlite3.OperationalError as exc:
-        logger.warning("init_db schema setup: %s (tables may already exist)", exc)
+            CREATE TABLE IF NOT EXISTS tasks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                assigned_to TEXT DEFAULT '',
+                assigned_by TEXT DEFAULT '',
+                status      TEXT DEFAULT 'pending',
+                priority    TEXT DEFAULT 'medium',
+                notes       TEXT DEFAULT '',
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+        """)
 
 
 # ── Agents ──────────────────────────────────────────────
@@ -164,19 +148,29 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
 
         if unread_only:
             rows = conn.execute(
-                """SELECT * FROM messages
-                   WHERE (to_agent=? AND read=0)
-                      OR (to_agent='__broadcast__'
-                          AND id NOT IN (SELECT msg_id FROM broadcast_reads WHERE agent_id=?))
-                   ORDER BY created_at""",
-                (agent_id, agent_id),
+                """SELECT m.* FROM messages AS m
+                   WHERE (m.to_agent=? AND m.read=0)
+                      OR (m.to_agent='__broadcast__'
+                          AND m.from_agent<>?
+                          AND EXISTS (
+                              SELECT 1 FROM agents AS a
+                              WHERE a.agent_id=? AND m.created_at>=a.registered_at)
+                          AND m.id NOT IN (
+                              SELECT msg_id FROM broadcast_reads WHERE agent_id=?))
+                   ORDER BY m.created_at""",
+                (agent_id, agent_id, agent_id, agent_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT * FROM messages
-                   WHERE to_agent=? OR to_agent='__broadcast__'
-                   ORDER BY created_at DESC LIMIT 50""",
-                (agent_id,),
+                """SELECT m.* FROM messages AS m
+                   WHERE m.to_agent=?
+                      OR (m.to_agent='__broadcast__'
+                          AND m.from_agent<>?
+                          AND EXISTS (
+                              SELECT 1 FROM agents AS a
+                              WHERE a.agent_id=? AND m.created_at>=a.registered_at))
+                   ORDER BY m.created_at DESC LIMIT 50""",
+                (agent_id, agent_id, agent_id),
             ).fetchall()
 
         # mark as read -- only mark direct messages; broadcasts use per-agent tracking
@@ -194,6 +188,25 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
                          (agent_id, mid))
 
     return [dict(r) for r in rows]
+
+
+def count_unread(agent_id: str) -> int:
+    """Count unread messages using the same recipient rules as ``read_inbox``."""
+    with _managed_conn() as conn:
+        _ensure_broadcast_reads(conn)
+        row = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM messages AS m
+               WHERE (m.to_agent=? AND m.read=0)
+                  OR (m.to_agent='__broadcast__'
+                      AND m.from_agent<>?
+                      AND EXISTS (
+                          SELECT 1 FROM agents AS a
+                          WHERE a.agent_id=? AND m.created_at>=a.registered_at)
+                      AND m.id NOT IN (
+                          SELECT msg_id FROM broadcast_reads WHERE agent_id=?))""",
+            (agent_id, agent_id, agent_id, agent_id),
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
 
 
 # ── Tasks ───────────────────────────────────────────────
@@ -214,15 +227,10 @@ def create_task(title: str, description: str, assigned_to: str, assigned_by: str
 
 
 def update_task(task_id: int, status: str = "", notes: str = "") -> bool:
-    # P0 Fix 4: Validate dynamic column names against allowlist
     update_fields: dict[str, object] = {"updated_at": time.time()}
     if status:
-        if "status" not in _VALID_COLUMNS:
-            raise ValueError("Invalid column name: status")
         update_fields["status"] = status
     if notes:
-        if "notes" not in _VALID_COLUMNS:
-            raise ValueError("Invalid column name: notes")
         update_fields["notes"] = notes
 
     with _managed_conn() as conn:

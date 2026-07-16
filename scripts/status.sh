@@ -6,17 +6,15 @@ set -euo pipefail
 
 STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$STUDIO_DIR/.venv/bin"
-BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, zero-dependency) or redis
+BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, no external datastore) or redis
 
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+case "$BACKEND" in
+    sqlite|redis) ;;
+    *) echo "ERROR: STUDIO_BACKEND must be 'sqlite' or 'redis' (got '$BACKEND')." >&2; exit 2 ;;
+esac
 
 STUDIO_BACKEND="$BACKEND" "$VENV/python" -c "
-import os, time, datetime
+import os
 
 backend = os.environ.get('STUDIO_BACKEND', 'sqlite')
 if backend == 'redis':

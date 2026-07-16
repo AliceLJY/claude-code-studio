@@ -10,16 +10,41 @@ STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ── Multiplexer selection ──────────────────────────
 MUX="${STUDIO_MUX:-tmux}"
-if [ "$MUX" = "zellij" ]; then
-    exec "$STUDIO_DIR/scripts/launch-zellij.sh" "$@"
-fi
+case "$MUX" in
+    zellij) exec "$STUDIO_DIR/scripts/launch-zellij.sh" "$@" ;;
+    tmux) ;;
+    *) echo "ERROR: STUDIO_MUX must be 'tmux' or 'zellij' (got '$MUX')." >&2; exit 2 ;;
+esac
 
 SESSION="studio"
 HOST="${STUDIO_HOST:-localhost}"
 PORT="${STUDIO_PORT:-3777}"
-BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, zero-dependency) or redis
+BACKEND="${STUDIO_BACKEND:-sqlite}"  # sqlite (default, no external datastore) or redis
 VENV="$STUDIO_DIR/.venv/bin"
 AGENT_COUNT="${1:-3}"  # default 3 worker agents
+
+case "$BACKEND" in
+    sqlite|redis) ;;
+    *) echo "ERROR: STUDIO_BACKEND must be 'sqlite' or 'redis' (got '$BACKEND')." >&2; exit 2 ;;
+esac
+if ! [[ "$AGENT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: agent count must be a positive integer (got '$AGENT_COUNT')." >&2
+    exit 2
+fi
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "ERROR: STUDIO_PORT must be an integer from 1 to 65535 (got '$PORT')." >&2
+    exit 2
+fi
+case "$HOST" in
+    localhost|127.*|::1|\[::1\]) ;;
+    *)
+        if [[ ! "${STUDIO_UNSAFE_REMOTE_MCP:-}" =~ ^(1|true|yes)$ ]]; then
+            echo "ERROR: refusing unauthenticated MCP bind on non-loopback host '$HOST'." >&2
+            echo "  Keep STUDIO_HOST local or explicitly set STUDIO_UNSAFE_REMOTE_MCP=1." >&2
+            exit 2
+        fi
+        ;;
+esac
 
 # Colors
 GREEN='\033[0;32m'
@@ -30,30 +55,30 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║   Claude Code Studio — Launching...  ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════╝${NC}"
 
-# ── 1. Kill old studio if running ───────────────────
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-    echo "Existing studio session found. Killing it..."
-    tmux kill-session -t "$SESSION"
+# Never assume a listener on the configured port belongs to Studio.
+LISTENER_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -n "$LISTENER_PIDS" ]; then
+    echo "ERROR: port $PORT is already in use by PID(s): ${LISTENER_PIDS//$'\n'/, }." >&2
+    echo "  Stop the existing service or choose another STUDIO_PORT." >&2
+    exit 1
 fi
 
-# Kill old MCP server if running
-if lsof -ti:"$PORT" >/dev/null 2>&1; then
-    echo "Killing old MCP server on port $PORT..."
-    kill "$(lsof -ti:"$PORT")" 2>/dev/null || true
-    sleep 1
-fi
-
-# ── 1c. Preflight: if redis backend requested, verify it's reachable ──
-# Without this the server logs a warning, keeps the SSE port open, and looks
-# "ready" while every studio tool call fails — a silent dead end.
+# ── 1c. Preflight: give a concise Redis error before background launch ──
+# The server independently fails closed if the backend becomes unavailable.
 if [ "$BACKEND" = "redis" ]; then
     if ! "$VENV/python" -c "import os,redis; redis.Redis.from_url(os.environ.get('STUDIO_REDIS_URL','redis://localhost:6379'), socket_connect_timeout=2).ping()" 2>/dev/null; then
-        echo "ERROR: STUDIO_BACKEND=redis but Redis is unreachable at ${STUDIO_REDIS_URL:-redis://localhost:6379}." >&2
-        echo "  Start it:  docker run -d -p 6379:6379 redis:7-alpine" >&2
-        echo "  Or use the zero-dependency default:  STUDIO_BACKEND=sqlite $0 $*" >&2
+        echo "ERROR: STUDIO_BACKEND=redis but the configured Redis endpoint is unreachable." >&2
+        echo "  Start it locally: docker run -d -p 127.0.0.1:6379:6379 redis:7-alpine" >&2
+        echo "  Or use the no-service default: STUDIO_BACKEND=sqlite $0 $*" >&2
         exit 1
     fi
     echo -e "${GREEN}Redis reachable.${NC}"
+fi
+
+# ── 1. Replace the named Studio multiplexer session ─────
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo "Existing studio session found. Replacing it..."
+    tmux kill-session -t "$SESSION"
 fi
 
 # ── 2. Start MCP server in background ──────────────
@@ -63,9 +88,24 @@ STUDIO_HOST="$HOST" STUDIO_PORT="$PORT" STUDIO_BACKEND="$BACKEND" \
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 
+cleanup_on_failure() {
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ -z "${WATCHER_PID:-}" ] || kill "$WATCHER_PID" >/dev/null 2>&1 || true
+        kill "$SERVER_PID" >/dev/null 2>&1 || true
+        tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION" || true
+    fi
+}
+trap cleanup_on_failure EXIT
+
 # Wait for server to be ready
 for i in $(seq 1 10); do
-    if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 || lsof -ti:"$PORT" >/dev/null 2>&1; then
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+        echo "ERROR: MCP server exited during startup. Check /tmp/studio-server.log" >&2
+        exit 1
+    fi
+    if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 \
+        || lsof -a -p "$SERVER_PID" -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo -e "${GREEN}MCP server is ready.${NC}"
         break
     fi
@@ -121,8 +161,8 @@ echo ""
 echo "  Quick start in each pane:"
 echo "    claude  (then use studio MCP tools to register, message, etc.)"
 echo ""
-echo "  Add to your Claude Code settings.json or use /mcp in each session:"
-echo "    {\"type\": \"sse\", \"url\": \"http://$HOST:$PORT/sse\"}"
+echo "  Configure Claude Code once from this repository:"
+echo "    claude mcp add --transport sse --scope local claude-code-studio http://$HOST:$PORT/sse"
 echo ""
 echo -e "${CYAN}Attaching to tmux session...${NC}"
 
