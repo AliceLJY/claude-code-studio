@@ -72,8 +72,10 @@ jobs:
             --pattern "$archive" \
             --pattern "$checksum" \
             --dir "$destination"
-          (cd "$destination" && sha256sum --check "$checksum")
           tar -xzf "$destination/$archive" -C "$destination"
+          expected="$(awk 'NR == 1 {print $1}' "$destination/$checksum")"
+          test -n "$expected"
+          (cd "$destination" && printf '%s  zellij\n' "$expected" | sha256sum --check -)
           echo "$destination" >> "$GITHUB_PATH"
       - name: Exercise live Redis and Zellij backends
         env:
