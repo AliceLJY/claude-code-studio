@@ -1,6 +1,6 @@
 {
   "hooks": {
-    "PostToolCall": [
+    "PostToolUse": [
       {
         "matcher": ".*",
         "hooks": [
