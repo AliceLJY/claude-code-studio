@@ -30,7 +30,9 @@ jobs:
       - name: Check Python and shell syntax
         run: |
           python -m compileall -q studio
-          bash -n scripts/launch.sh scripts/launch-zellij.sh scripts/runtime-state.sh scripts/status.sh
+          for script in scripts/launch.sh scripts/launch-zellij.sh scripts/runtime-state.sh scripts/status.sh; do
+            bash -n "$script"
+          done
       - name: Verify dependencies and wheel
         run: |
           python -m pip check
