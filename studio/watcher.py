@@ -97,6 +97,7 @@ def run_redis():
     """Subscribe to Redis notifications with fallback polling for missed messages."""
     import threading
     import redis as redis_lib
+    from studio import db_redis
 
     redis_url = os.environ.get("STUDIO_REDIS_URL", "redis://localhost:6379")
     r = redis_lib.Redis.from_url(redis_url, decode_responses=True)
@@ -119,8 +120,7 @@ def run_redis():
                 for aid in r.smembers("studio:agents"):
                     if aid not in panes:
                         continue
-                    inbox_len = r.llen(f"studio:inbox:{aid}")
-                    if inbox_len > 0:
+                    if db_redis.count_unread(aid, connection=r) > 0:
                         _try_kick(aid, kicked, cooldown, "fallback poll")
             except redis_lib.ConnectionError as e:
                 logger.warning("Fallback poll Redis connection error (%s)", type(e).__name__)

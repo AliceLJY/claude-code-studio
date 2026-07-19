@@ -206,6 +206,36 @@ def read_inbox(agent_id: str, unread_only: bool = True) -> list[dict]:
     return msgs
 
 
+def count_unread(agent_id: str, connection=None) -> int:
+    """Count unread direct and per-recipient broadcast messages.
+
+    The inbox list also retains history when ``read_inbox(..., unread_only=False)``
+    is used, so its raw length is not an unread count.
+    """
+    r = connection or get_conn()
+    inbox_key = f"{REDIS_PREFIX}inbox:{agent_id}"
+    already_bcast = set(r.smembers(f"{REDIS_PREFIX}bcast_read:{agent_id}"))
+    stale_mids = []
+    unread = 0
+    for mid in r.lrange(inbox_key, 0, -1):
+        data = r.hgetall(f"{REDIS_PREFIX}msg:{mid}")
+        if not data:
+            stale_mids.append(mid)
+            continue
+        if data.get("to_agent") == "__broadcast__":
+            if mid not in already_bcast:
+                unread += 1
+        elif int(data.get("read", 0)) == 0:
+            unread += 1
+
+    if stale_mids:
+        pipe = r.pipeline(transaction=True)
+        for mid in stale_mids:
+            pipe.lrem(inbox_key, 0, mid)
+        pipe.execute()
+    return unread
+
+
 # ── Tasks ───────────────────────────────────────────────
 
 def _next_task_id(r: redis.Redis) -> int:

@@ -3,30 +3,23 @@
 Selection via STUDIO_MUX env var: "tmux" (default) or "zellij".
 """
 
-import atexit
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
 _mux = os.environ.get("STUDIO_MUX", "tmux")
 SESSION = "studio"
-PANE_MAP_FILE = "/tmp/studio-zellij-panes.json"
-
-
-# P2: Zellij temp file cleanup on exit
-def _cleanup_zellij_temp():
-    if _mux == "zellij" and os.path.exists(PANE_MAP_FILE):
-        try:
-            os.remove(PANE_MAP_FILE)
-        except OSError:
-            pass
-
-
-atexit.register(_cleanup_zellij_temp)
+_uid = os.getuid() if hasattr(os, "getuid") else "user"
+_default_runtime_dir = os.path.join(tempfile.gettempdir(), f"claude-code-studio-{_uid}")
+PANE_MAP_FILE = os.environ.get(
+    "STUDIO_PANE_MAP_FILE",
+    os.path.join(_default_runtime_dir, "studio-zellij-panes.json"),
+)
 
 
 # ── Shared helpers ─────────────────────────────────────
@@ -80,7 +73,7 @@ def _zellij_load_pane_map() -> dict[str, str]:
     try:
         with open(PANE_MAP_FILE) as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError):
         return {}
 
 

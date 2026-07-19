@@ -189,6 +189,7 @@ In SQLite mode the watcher polls instead of subscribing to Redis. Auto-wake is b
 | `STUDIO_BACKEND` | `sqlite` | Storage backend: `sqlite` (no external service) or `redis` (real-time pub/sub) |
 | `STUDIO_REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
 | `STUDIO_MUX` | `tmux` | Terminal multiplexer: `tmux` or `zellij` |
+| `STUDIO_STATE_DIR` | private per-user runtime directory | Runtime logs, Zellij layout, pane map, and pane wrappers |
 | `STUDIO_DB_PATH` | `~/.claude-code-studio/studio.db` | SQLite database path (sqlite mode) |
 | `STUDIO_AUTO_KICK` | `1` | Set to `0` to stop the watcher from auto-kicking agents (the idle heuristic can misfire) |
 | `STUDIO_UNSAFE_REMOTE_MCP` | unset | Explicit opt-in required before binding the unauthenticated MCP server to a non-loopback host |

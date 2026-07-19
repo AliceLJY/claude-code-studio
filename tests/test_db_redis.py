@@ -76,6 +76,24 @@ class RedisBackendTests(unittest.TestCase):
         pipeline.lrem.assert_any_call("studio:inbox:agent-1", 1, "2")
         pipeline.execute.assert_called_once_with()
 
+    def test_count_unread_ignores_history_and_prunes_expired_ids(self):
+        connection = MagicMock()
+        connection.lrange.return_value = ["direct-read", "broadcast-read", "direct-new", "expired"]
+        connection.smembers.return_value = {"broadcast-read"}
+        connection.hgetall.side_effect = [
+            {"to_agent": "agent-1", "read": "1"},
+            {"to_agent": "__broadcast__", "read": "0"},
+            {"to_agent": "agent-1", "read": "0"},
+            {},
+        ]
+        pipeline = connection.pipeline.return_value
+
+        unread = db_redis.count_unread("agent-1", connection=connection)
+
+        self.assertEqual(unread, 1)
+        pipeline.lrem.assert_called_once_with("studio:inbox:agent-1", 0, "expired")
+        pipeline.execute.assert_called_once_with()
+
     def test_get_tasks_prunes_expired_task_ids(self):
         connection = MagicMock()
         connection.lrange.return_value = ["expired", "3"]

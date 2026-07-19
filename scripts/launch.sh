@@ -7,6 +7,7 @@
 set -euo pipefail
 
 STUDIO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "$STUDIO_DIR/scripts/runtime-state.sh"
 
 # ── Multiplexer selection ──────────────────────────
 MUX="${STUDIO_MUX:-tmux}"
@@ -82,9 +83,12 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 # ── 2. Start MCP server in background ──────────────
+studio_prepare_runtime_dir
+SERVER_LOG="$STUDIO_RUNTIME_DIR/studio-server.log"
+WATCHER_LOG="$STUDIO_RUNTIME_DIR/studio-watcher.log"
 echo -e "${CYAN}Starting MCP server on $HOST:$PORT (backend: $BACKEND)...${NC}"
 STUDIO_HOST="$HOST" STUDIO_PORT="$PORT" STUDIO_BACKEND="$BACKEND" \
-    "$VENV/python" -m studio.server > /tmp/studio-server.log 2>&1 &
+    "$VENV/python" -m studio.server > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 
@@ -101,7 +105,7 @@ trap cleanup_on_failure EXIT
 # Wait for server to be ready
 for i in $(seq 1 10); do
     if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
-        echo "ERROR: MCP server exited during startup. Check /tmp/studio-server.log" >&2
+        echo "ERROR: MCP server exited during startup. Check $SERVER_LOG" >&2
         exit 1
     fi
     if curl -sf --max-time 1 "http://$HOST:$PORT/sse" >/dev/null 2>&1 \
@@ -110,7 +114,7 @@ for i in $(seq 1 10); do
         break
     fi
     if [ "$i" -eq 10 ]; then
-        echo "ERROR: MCP server failed to start. Check /tmp/studio-server.log"
+        echo "ERROR: MCP server failed to start. Check $SERVER_LOG"
         exit 1
     fi
     sleep 0.5
@@ -118,7 +122,7 @@ done
 
 # ── 2b. Start watcher daemon ───────────────────────
 echo -e "${CYAN}Starting auto-kick watcher ($BACKEND mode)...${NC}"
-STUDIO_BACKEND="$BACKEND" "$VENV/python" -u -m studio.watcher > /tmp/studio-watcher.log 2>&1 &
+STUDIO_BACKEND="$BACKEND" "$VENV/python" -u -m studio.watcher > "$WATCHER_LOG" 2>&1 &
 WATCHER_PID=$!
 echo "Watcher PID: $WATCHER_PID"
 
@@ -149,7 +153,7 @@ echo -e "${GREEN}Studio is ready!${NC}"
 echo ""
 echo "  tmux session: $SESSION"
 echo "  MCP server:   http://$HOST:$PORT/sse"
-echo "  Server log:   /tmp/studio-server.log"
+echo "  Server log:   $SERVER_LOG"
 echo "  Server PID:   $SERVER_PID"
 echo ""
 echo "  Windows:"

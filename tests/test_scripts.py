@@ -1,6 +1,8 @@
 import os
 import socket
+import stat
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +18,7 @@ class ScriptValidationTests(unittest.TestCase):
             "STUDIO_HOST",
             "STUDIO_MUX",
             "STUDIO_PORT",
+            "STUDIO_STATE_DIR",
             "STUDIO_UNSAFE_REMOTE_MCP",
         ):
             env.pop(key, None)
@@ -74,6 +77,59 @@ class ScriptValidationTests(unittest.TestCase):
         result = self.run_script("status.sh", STUDIO_BACKEND="redsi")
         self.assertEqual(result.returncode, 2)
         self.assertIn("STUDIO_BACKEND", result.stderr)
+
+    def test_runtime_state_helper_creates_private_owned_directory(self):
+        with tempfile.TemporaryDirectory(prefix="studio-runtime-test-") as parent:
+            runtime_dir = str(Path(parent) / "runtime")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; STUDIO_STATE_DIR="$2"; studio_prepare_runtime_dir; printf "%s" "$STUDIO_RUNTIME_DIR"',
+                    "bash",
+                    str(ROOT / "scripts" / "runtime-state.sh"),
+                    runtime_dir,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, runtime_dir)
+            self.assertEqual(stat.S_IMODE(os.stat(runtime_dir).st_mode), 0o700)
+
+    def test_runtime_state_helper_rejects_symlink_directory(self):
+        with tempfile.TemporaryDirectory(prefix="studio-runtime-link-") as parent:
+            target = Path(parent) / "target"
+            target.mkdir()
+            runtime_link = Path(parent) / "runtime"
+            runtime_link.symlink_to(target, target_is_directory=True)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; STUDIO_STATE_DIR="$2"; studio_prepare_runtime_dir',
+                    "bash",
+                    str(ROOT / "scripts" / "runtime-state.sh"),
+                    str(runtime_link),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("refusing symlink", result.stderr)
+
+    def test_zellij_launcher_passes_mux_and_pane_map_to_server(self):
+        source = (ROOT / "scripts" / "launch-zellij.sh").read_text(encoding="utf-8")
+        server_start = source[source.index('Starting MCP server'):source.index('SERVER_PID=$!')]
+        self.assertIn('STUDIO_MUX="zellij"', server_start)
+        self.assertIn('STUDIO_PANE_MAP_FILE="$PANE_MAP"', server_start)
+        self.assertNotIn('/tmp/studio-zellij-panes.json', source)
 
 
 if __name__ == "__main__":
